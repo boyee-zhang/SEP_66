@@ -251,7 +251,7 @@ public abstract class BaseConnectorTest
 
         try {
             assertUpdate("CREATE SCHEMA " + schemaName);
-            assertUpdate("CREATE MATERIALIZED VIEW " + schemaName + ".mv_t  AS SELECT 123 x");
+            assertUpdate("CREATE MATERIALIZED VIEW " + schemaName + ".mv_t  AS SELECT 123 x", 1);
 
             assertQueryFails("DROP SCHEMA " + schemaName, ".*Cannot drop non-empty schema '\\Q" + schemaName + "\\E'");
         }
@@ -785,9 +785,9 @@ public abstract class BaseConnectorTest
                 getSession().getSchema().orElseThrow(),
                 "test_materialized_view_with_comment_" + randomTableSuffix());
 
-        createTestingMaterializedView(view, Optional.empty());
-        createTestingMaterializedView(otherView, Optional.of("sarcastic comment"));
-        createTestingMaterializedView(viewWithComment, Optional.of("mv_comment"));
+        createTestingMaterializedView(view, Optional.empty(), false);
+        createTestingMaterializedView(otherView, Optional.of("sarcastic comment"), true);
+        createTestingMaterializedView(viewWithComment, Optional.of("mv_comment"), true);
 
         // verify comment
         MaterializedResult materializedRows = computeActual("SHOW CREATE MATERIALIZED VIEW " + viewWithComment);
@@ -1131,7 +1131,7 @@ public abstract class BaseConnectorTest
                 session.getSchema().orElseThrow(),
                 "test_materialized_view_rename_" + randomTableSuffix());
 
-        createTestingMaterializedView(originalMaterializedView, Optional.empty());
+        createTestingMaterializedView(originalMaterializedView, Optional.empty(), true);
 
         String renamedMaterializedView = "test_materialized_view_rename_new_" + randomTableSuffix();
         if (!hasBehavior(SUPPORTS_RENAME_MATERIALIZED_VIEW)) {
@@ -1191,13 +1191,13 @@ public abstract class BaseConnectorTest
                 .matches("SELECT * FROM nation");
     }
 
-    private void createTestingMaterializedView(QualifiedObjectName view, Optional<String> comment)
+    private void createTestingMaterializedView(QualifiedObjectName view, Optional<String> comment, boolean withData)
     {
         assertUpdate(format("CREATE SCHEMA IF NOT EXISTS %s", view.getSchemaName()));
         assertUpdate(format(
-                "CREATE MATERIALIZED VIEW %s %s AS SELECT * FROM nation",
+                "CREATE MATERIALIZED VIEW %s %s AS SELECT * FROM nation " + (withData ? "WITH DATA" : " WITH NO DATA"),
                 view,
-                comment.map(c -> format("COMMENT '%s'", c)).orElse("")));
+                comment.map(c -> format("COMMENT '%s'", c)).orElse("")), withData ? 25 : 0);
     }
 
     private String getTestingMaterializedViewsResultRow(QualifiedObjectName materializedView, String comment)
@@ -1261,7 +1261,7 @@ public abstract class BaseConnectorTest
         assertUpdate("CREATE VIEW " + regularViewName + " AS SELECT * FROM region");
 
         String materializedViewName = "test_views_together_materialized_" + randomTableSuffix();
-        assertUpdate("CREATE MATERIALIZED VIEW " + materializedViewName + " AS SELECT * FROM nation");
+        assertUpdate("CREATE MATERIALIZED VIEW " + materializedViewName + " AS SELECT * FROM nation", 25);
 
         // both should be accessible via information_schema.views
         // TODO: actually it is not the cased now hence overridable `checkInformationSchemaViewsForMaterializedView`
@@ -1337,12 +1337,12 @@ public abstract class BaseConnectorTest
         Runnable writeInitialized = writeTasksInitialized::countDown;
         Supplier<Boolean> done = () -> incompleteReadTasks.get() == 0;
         List<Callable<Void>> writeTasks = new ArrayList<>();
-        writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_table", "CREATE TABLE %s(a integer)", "DROP TABLE %s"));
+        writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_table", "CREATE TABLE %s(a integer)", Optional.empty(), "DROP TABLE %s"));
         if (hasBehavior(SUPPORTS_CREATE_VIEW)) {
-            writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_view", "CREATE VIEW %s AS SELECT 1 a", "DROP VIEW %s"));
+            writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_view", "CREATE VIEW %s AS SELECT 1 a", Optional.empty(), "DROP VIEW %s"));
         }
         if (hasBehavior(SUPPORTS_CREATE_MATERIALIZED_VIEW)) {
-            writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_mview", "CREATE MATERIALIZED VIEW %s AS SELECT 1 a", "DROP MATERIALIZED VIEW %s"));
+            writeTasks.add(createDropRepeatedly(writeInitialized, done, "concur_mview", "CREATE MATERIALIZED VIEW %s AS SELECT 1 a", Optional.of(1L), "DROP MATERIALIZED VIEW %s"));
         }
         assertEquals(writeTasks.size() * 2, writeTasksCount);
 
@@ -1407,7 +1407,7 @@ public abstract class BaseConnectorTest
         };
     }
 
-    protected Callable<Void> createDropRepeatedly(Runnable initReady, Supplier<Boolean> done, String namePrefix, String createTemplate, String dropTemplate)
+    protected Callable<Void> createDropRepeatedly(Runnable initReady, Supplier<Boolean> done, String namePrefix, String createTemplate, Optional<Long> createUpdateCount, String dropTemplate)
     {
         return new Callable<>()
         {
@@ -1418,14 +1418,24 @@ public abstract class BaseConnectorTest
                 Deque<String> liveObjects = new ArrayDeque<>(objectsToKeep);
                 for (int i = 0; i < objectsToKeep; i++) {
                     String name = namePrefix + "_" + randomTableSuffix();
-                    assertUpdate(format(createTemplate, name));
+                    if (createUpdateCount.isPresent()) {
+                        assertUpdate(format(createTemplate, name), createUpdateCount.get());
+                    }
+                    else {
+                        assertUpdate(format(createTemplate, name));
+                    }
                     liveObjects.addLast(name);
                 }
                 initReady.run();
                 while (!done.get()) {
                     assertUpdate(format(dropTemplate, liveObjects.removeFirst()));
                     String name = namePrefix + "_" + randomTableSuffix();
-                    assertUpdate(format(createTemplate, name));
+                    if (createUpdateCount.isPresent()) {
+                        assertUpdate(format(createTemplate, name), createUpdateCount.get());
+                    }
+                    else {
+                        assertUpdate(format(createTemplate, name));
+                    }
                     liveObjects.addLast(name);
                 }
                 while (!liveObjects.isEmpty()) {
@@ -3495,7 +3505,7 @@ public abstract class BaseConnectorTest
         String viewName = "tcn_" + nameInSql.toLowerCase(ENGLISH).replaceAll("[^a-z0-9]", "_") + "_" + randomTableSuffix();
 
         try {
-            assertUpdate("CREATE MATERIALIZED VIEW " + viewName + " AS SELECT 'sample value' key, 'abc' " + nameInSql);
+            assertUpdate("CREATE MATERIALIZED VIEW " + viewName + " AS SELECT 'sample value' key, 'abc' " + nameInSql + " WITH NO DATA", 0);
         }
         catch (RuntimeException e) {
             if (isColumnNameRejected(e, columnName, delimited)) {
