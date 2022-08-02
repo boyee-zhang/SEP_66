@@ -1373,7 +1373,7 @@ public class IcebergMetadata
         return new ConnectorTableMetadata(table, columns.build(), getIcebergTableProperties(icebergTable), getTableComment(icebergTable));
     }
 
-    private List<ColumnMetadata> getColumnMetadatas(Table table)
+    public List<ColumnMetadata> getColumnMetadatas(Table table)
     {
         return table.schema().columns().stream()
                 .map(column ->
@@ -1779,7 +1779,7 @@ public class IcebergMetadata
                 false));
     }
 
-    private static Set<Integer> identityPartitionColumnsInAllSpecs(Table table)
+    public static Set<Integer> identityPartitionColumnsInAllSpecs(Table table)
     {
         // Extract identity partition column source ids common to ALL specs
         return table.spec().fields().stream()
