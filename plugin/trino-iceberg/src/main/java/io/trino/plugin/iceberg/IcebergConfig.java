@@ -32,6 +32,7 @@ import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.trino.plugin.hive.HiveCompressionCodec.ZSTD;
 import static io.trino.plugin.iceberg.CatalogType.HIVE_METASTORE;
 import static io.trino.plugin.iceberg.IcebergFileFormat.ORC;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.InsertExistingPartitionsBehavior.APPEND;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -54,6 +55,7 @@ public class IcebergConfig
     private boolean tableStatisticsEnabled = true;
     private boolean extendedStatisticsEnabled;
     private boolean projectionPushdownEnabled = true;
+    private Optional<IcebergSessionProperties.InsertExistingPartitionsBehavior> insertExistingPartitionsBehavior = Optional.empty();
     private Optional<String> hiveCatalogName = Optional.empty();
     private int formatVersion = FORMAT_VERSION_SUPPORT_MAX;
     private Duration expireSnapshotsMinRetention = new Duration(7, DAYS);
@@ -207,6 +209,11 @@ public class IcebergConfig
     {
         this.projectionPushdownEnabled = projectionPushdownEnabled;
         return this;
+    }
+
+    public IcebergSessionProperties.InsertExistingPartitionsBehavior getInsertExistingPartitionsBehavior()
+    {
+        return insertExistingPartitionsBehavior.orElse(APPEND);
     }
 
     public Optional<String> getHiveCatalogName()
