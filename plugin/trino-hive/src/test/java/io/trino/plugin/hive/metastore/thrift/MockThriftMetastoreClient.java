@@ -233,6 +233,13 @@ public class MockThriftMetastoreClient
     }
 
     @Override
+    public void setPartitionColumnStatisticsBatch(String databaseName, String tableName, Map<String, List<ColumnStatisticsObj>> partitionStatistics)
+    {
+        accessCount.incrementAndGet();
+        // No-op
+    }
+
+    @Override
     public void deletePartitionColumnStatistics(String databaseName, String tableName, String partitionName, String columnName)
     {
         throw new UnsupportedOperationException();
@@ -512,6 +519,13 @@ public class MockThriftMetastoreClient
     public void alterPartitions(String dbName, String tableName, List<Partition> partitions, long writeId)
     {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void alterPartitions(String dbName, String tableName, List<Partition> partitions)
+    {
+        accessCount.incrementAndGet();
+        // No-op
     }
 
     @Override

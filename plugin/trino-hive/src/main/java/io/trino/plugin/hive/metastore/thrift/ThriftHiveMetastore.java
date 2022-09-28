@@ -92,6 +92,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -99,6 +100,7 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -151,6 +153,8 @@ public class ThriftHiveMetastore
     private final boolean deleteFilesOnDrop;
     private final boolean translateHiveViews;
     private final boolean assumeCanonicalPartitionKeys;
+    private final boolean updatePartitionStatisticsBatchEnabled;
+    private final int updatePartitionStatisticsBatchSize;
     private final ThriftMetastoreStats stats;
 
     public ThriftHiveMetastore(
@@ -166,6 +170,8 @@ public class ThriftHiveMetastore
             boolean deleteFilesOnDrop,
             boolean translateHiveViews,
             boolean assumeCanonicalPartitionKeys,
+            boolean updatePartitionStatisticsBatchEnabled,
+            int updatePartitionStatisticsBatchSize,
             ThriftMetastoreStats stats)
     {
         this.identity = requireNonNull(identity, "identity is null");
@@ -180,6 +186,8 @@ public class ThriftHiveMetastore
         this.deleteFilesOnDrop = deleteFilesOnDrop;
         this.translateHiveViews = translateHiveViews;
         this.assumeCanonicalPartitionKeys = assumeCanonicalPartitionKeys;
+        this.updatePartitionStatisticsBatchEnabled = updatePartitionStatisticsBatchEnabled;
+        this.updatePartitionStatisticsBatchSize = updatePartitionStatisticsBatchSize;
         this.stats = requireNonNull(stats, "stats is null");
     }
 
@@ -360,7 +368,7 @@ public class ThriftHiveMetastore
                         partition -> makePartName(partitionColumns, partition.getValues()),
                         partition -> getHiveBasicStatistics(partition.getParameters())));
         Map<String, OptionalLong> partitionRowCounts = partitionBasicStatistics.entrySet().stream()
-                .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().getRowCount()));
+                .collect(toImmutableMap(Entry::getKey, entry -> entry.getValue().getRowCount()));
         Map<String, Map<String, HiveColumnStatistics>> partitionColumnStatistics = getPartitionColumnStatistics(
                 table.getDbName(),
                 table.getTableName(),
@@ -411,7 +419,7 @@ public class ThriftHiveMetastore
         return getMetastorePartitionColumnStatistics(databaseName, tableName, partitionNames, columnNames).entrySet().stream()
                 .filter(entry -> !entry.getValue().isEmpty())
                 .collect(toImmutableMap(
-                        Map.Entry::getKey,
+                        Entry::getKey,
                         entry -> groupStatisticsByColumn(entry.getValue(), partitionRowCounts.getOrDefault(entry.getKey(), OptionalLong.empty()))));
     }
 
@@ -569,6 +577,96 @@ public class ThriftHiveMetastore
         removedStatistics.forEach(column -> deletePartitionColumnStatistics(table.getDbName(), table.getTableName(), partitionName, column));
     }
 
+    @Override
+    public void updatePartitionStatistics(Table table, Map<String, Function<PartitionStatistics, PartitionStatistics>> updates)
+    {
+        if (updatePartitionStatisticsBatchEnabled) {
+            if (updates.size() <= updatePartitionStatisticsBatchSize) {
+                updatePartitionStatisticsBatch(table, updates);
+                return;
+            }
+
+            Map<String, Function<PartitionStatistics, PartitionStatistics>> batch = new HashMap<>(updatePartitionStatisticsBatchSize);
+            updates.forEach((partitionName, update) -> {
+                batch.put(partitionName, update);
+                if (batch.size() >= updatePartitionStatisticsBatchSize) {
+                    updatePartitionStatisticsBatch(table, batch);
+                    batch.clear();
+                }
+            });
+            if (!batch.isEmpty()) {
+                updatePartitionStatisticsBatch(table, batch);
+                batch.clear();
+            }
+        }
+        else {
+            updates.forEach((partitionName, update) -> updatePartitionStatistics(table, partitionName, update));
+        }
+    }
+
+    private void updatePartitionStatisticsBatch(Table table, Map<String, Function<PartitionStatistics, PartitionStatistics>> updates)
+    {
+        List<String> partitionNames = updates.keySet().stream().collect(toImmutableList());
+        List<Partition> partitions = getPartitionsByNames(table.getDbName(), table.getTableName(), partitionNames);
+        checkState(partitionNames.size() == partitions.size(),
+                "getPartitionsByNames() did not return required partition count, required %s, actual %s",
+                partitionNames.size(), partitions.size());
+
+        Map<String, PartitionStatistics> partitionStatistics = getPartitionStatistics(table, partitions);
+
+        ImmutableList.Builder<Partition> modifiedPartitionBatchBuilder = ImmutableList.builder();
+        ImmutableMap.Builder<String, List<ColumnStatisticsObj>> updatedStatisticsBatchBuilder = ImmutableMap.builder();
+        ImmutableMap.Builder<String, Set<String>> removedStatisticsBatchBuilder = ImmutableMap.builder();
+
+        for (int i = 0; i < partitionNames.size(); i++) {
+            String partitionName = partitionNames.get(i);
+            Partition originalPartition = partitions.get(i);
+            Function<PartitionStatistics, PartitionStatistics> update = updates.get(partitionName);
+
+            PartitionStatistics currentStatistics = requireNonNull(
+                    partitionStatistics.get(partitionName), "getPartitionStatistics() did not return statistics for partition");
+            PartitionStatistics updatedStatistics = update.apply(currentStatistics);
+
+            Partition modifiedPartition = originalPartition.deepCopy();
+            HiveBasicStatistics basicStatistics = updatedStatistics.getBasicStatistics();
+            modifiedPartition.setParameters(updateStatisticsParameters(modifiedPartition.getParameters(), basicStatistics));
+            modifiedPartitionBatchBuilder.add(modifiedPartition);
+
+            Map<String, HiveType> columns = modifiedPartition.getSd().getCols().stream()
+                    .collect(toImmutableMap(FieldSchema::getName, schema -> HiveType.valueOf(schema.getType())));
+            List<ColumnStatisticsObj> metastoreColumnStatistics = toMetastoreColumnStatistics(columns, updatedStatistics.getColumnStatistics(), basicStatistics.getRowCount());
+            if (!metastoreColumnStatistics.isEmpty()) {
+                updatedStatisticsBatchBuilder.put(partitionName, metastoreColumnStatistics);
+            }
+
+            Set<String> removedStatistics = difference(currentStatistics.getColumnStatistics().keySet(), updatedStatistics.getColumnStatistics().keySet());
+            if (!removedStatistics.isEmpty()) {
+                removedStatisticsBatchBuilder.put(partitionName, removedStatistics);
+            }
+        }
+
+        List<Partition> modifiedPartitionBatch = modifiedPartitionBatchBuilder.build();
+        Map<String, List<ColumnStatisticsObj>> updatedStatisticsBatch = updatedStatisticsBatchBuilder.buildOrThrow();
+        Map<String, Set<String>> removedStatisticsBatch = removedStatisticsBatchBuilder.buildOrThrow();
+
+        alterPartitions(table.getDbName(), table.getTableName(), modifiedPartitionBatch);
+        setPartitionColumnStatisticsBatch(table.getDbName(), table.getTableName(), updatedStatisticsBatch);
+        removedStatisticsBatch.forEach(
+                (partitionName, removedStatistics) -> removedStatistics.forEach(
+                        column -> deletePartitionColumnStatistics(table.getDbName(), table.getTableName(), partitionName, column)));
+    }
+
+    private List<ColumnStatisticsObj> toMetastoreColumnStatistics(
+            Map<String, HiveType> columns,
+            Map<String, HiveColumnStatistics> columnStatistics,
+            OptionalLong rowCount)
+    {
+        return columnStatistics.entrySet().stream()
+                .filter(entry -> columns.containsKey(entry.getKey()))
+                .map(entry -> createMetastoreColumnStatistics(entry.getKey(), columns.get(entry.getKey()), entry.getValue(), rowCount))
+                .collect(toImmutableList());
+    }
+
     private void setPartitionColumnStatistics(
             String databaseName,
             String tableName,
@@ -577,10 +675,7 @@ public class ThriftHiveMetastore
             Map<String, HiveColumnStatistics> columnStatistics,
             OptionalLong rowCount)
     {
-        List<ColumnStatisticsObj> metastoreColumnStatistics = columnStatistics.entrySet().stream()
-                .filter(entry -> columns.containsKey(entry.getKey()))
-                .map(entry -> createMetastoreColumnStatistics(entry.getKey(), columns.get(entry.getKey()), entry.getValue(), rowCount))
-                .collect(toImmutableList());
+        List<ColumnStatisticsObj> metastoreColumnStatistics = toMetastoreColumnStatistics(columns, columnStatistics, rowCount);
         if (!metastoreColumnStatistics.isEmpty()) {
             setPartitionColumnStatistics(databaseName, tableName, partitionName, metastoreColumnStatistics);
         }
@@ -595,6 +690,30 @@ public class ThriftHiveMetastore
                     .run("setPartitionColumnStatistics", stats.getSetPartitionColumnStatistics().wrap(() -> {
                         try (ThriftMetastoreClient client = createMetastoreClient()) {
                             client.setPartitionColumnStatistics(databaseName, tableName, partitionName, statistics);
+                        }
+                        return null;
+                    }));
+        }
+        catch (NoSuchObjectException e) {
+            throw new TableNotFoundException(new SchemaTableName(databaseName, tableName));
+        }
+        catch (TException e) {
+            throw new TrinoException(HIVE_METASTORE_ERROR, e);
+        }
+        catch (Exception e) {
+            throw propagate(e);
+        }
+    }
+
+    private void setPartitionColumnStatisticsBatch(String databaseName, String tableName, Map<String, List<ColumnStatisticsObj>> partitionStatistics)
+    {
+        try {
+            retry()
+                    .stopOn(NoSuchObjectException.class, InvalidObjectException.class, MetaException.class, InvalidInputException.class)
+                    .stopOnIllegalExceptions()
+                    .run("setPartitionColumnStatisticsBatch", stats.getSetPartitionColumnStatistics().wrap(() -> {
+                        try (ThriftMetastoreClient client = createMetastoreClient()) {
+                            client.setPartitionColumnStatisticsBatch(databaseName, tableName, partitionStatistics);
                         }
                         return null;
                     }));
@@ -1784,6 +1903,26 @@ public class ThriftHiveMetastore
                     .run("alterPartitions", stats.getAlterPartitions().wrap(() -> {
                         try (ThriftMetastoreClient metastoreClient = createMetastoreClient()) {
                             metastoreClient.alterPartitions(dbName, tableName, partitions, writeId);
+                        }
+                        return null;
+                    }));
+        }
+        catch (TException e) {
+            throw new TrinoException(HIVE_METASTORE_ERROR, e);
+        }
+        catch (Exception e) {
+            throw propagate(e);
+        }
+    }
+
+    private void alterPartitions(String dbName, String tableName, List<Partition> partitions)
+    {
+        try {
+            retry()
+                    .stopOnIllegalExceptions()
+                    .run("alterPartitions", stats.getAlterPartitions().wrap(() -> {
+                        try (ThriftMetastoreClient metastoreClient = createMetastoreClient()) {
+                            metastoreClient.alterPartitions(dbName, tableName, partitions);
                         }
                         return null;
                     }));
