@@ -59,14 +59,16 @@ public class UiQueryResource
     private final AccessControl accessControl;
     private final HttpRequestSessionContextFactory sessionContextFactory;
     private final Optional<String> alternateHeaderName;
+    private final WebUiConfig webUiConfig;
 
     @Inject
-    public UiQueryResource(DispatchManager dispatchManager, AccessControl accessControl, HttpRequestSessionContextFactory sessionContextFactory, ProtocolConfig protocolConfig)
+    public UiQueryResource(DispatchManager dispatchManager, AccessControl accessControl, HttpRequestSessionContextFactory sessionContextFactory, ProtocolConfig protocolConfig, WebUiConfig webUiConfig)
     {
         this.dispatchManager = requireNonNull(dispatchManager, "dispatchManager is null");
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
         this.sessionContextFactory = requireNonNull(sessionContextFactory, "sessionContextFactory is null");
         this.alternateHeaderName = protocolConfig.getAlternateHeaderName();
+        this.webUiConfig = requireNonNull(webUiConfig, "formWebUiConfig is null");
     }
 
     @ResourceSecurity(WEB_UI)
@@ -81,7 +83,7 @@ public class UiQueryResource
         ImmutableList.Builder<TrimmedBasicQueryInfo> builder = ImmutableList.builder();
         for (BasicQueryInfo queryInfo : queries) {
             if (stateFilter == null || queryInfo.getState() == expectedState) {
-                builder.add(new TrimmedBasicQueryInfo(queryInfo));
+                builder.add(new TrimmedBasicQueryInfo(truncateQueryInfo(queryInfo, webUiConfig.getQueryMaxDisplayLength())));
             }
         }
         return builder.build();
@@ -146,6 +148,29 @@ public class UiQueryResource
         }
         catch (NoSuchElementException e) {
             return Response.status(Status.GONE).build();
+        }
+    }
+
+    private static BasicQueryInfo truncateQueryInfo(BasicQueryInfo queryInfo, int queryMaxDisplayLength)
+    {
+        if (queryInfo.getQuery().length() > queryMaxDisplayLength) {
+            return new BasicQueryInfo(queryInfo.getQueryId(),
+                    queryInfo.getSession(),
+                    queryInfo.getResourceGroupId(),
+                    queryInfo.getState(),
+                    queryInfo.getMemoryPool(),
+                    queryInfo.isScheduled(),
+                    queryInfo.getSelf(),
+                    queryInfo.getQuery().substring(0, queryMaxDisplayLength),
+                    queryInfo.getUpdateType(),
+                    queryInfo.getPreparedQuery(),
+                    queryInfo.getQueryStats(),
+                    queryInfo.getErrorType(),
+                    queryInfo.getErrorCode(),
+                    queryInfo.getQueryType());
+        }
+        else {
+            return queryInfo;
         }
     }
 }
