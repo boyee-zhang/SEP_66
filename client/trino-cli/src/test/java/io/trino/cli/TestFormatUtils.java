@@ -17,7 +17,13 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import org.testng.annotations.Test;
 
-import static io.trino.cli.FormatUtils.*;
+import static io.trino.cli.FormatUtils.formatCount;
+import static io.trino.cli.FormatUtils.formatCountRate;
+import static io.trino.cli.FormatUtils.formatDataRate;
+import static io.trino.cli.FormatUtils.formatDataSize;
+import static io.trino.cli.FormatUtils.formatFinalTime;
+import static io.trino.cli.FormatUtils.formatProgressBar;
+import static io.trino.cli.FormatUtils.pluralize;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 
@@ -275,6 +281,9 @@ public class TestFormatUtils
         assertEquals(formatDataRate(DataSize.ofBytes(864000), Duration.valueOf("10d"), true), "1B/s");
         assertEquals(formatDataRate(DataSize.ofBytes(8640000), Duration.valueOf("10d"), false), "10B");
         assertEquals(formatDataRate(DataSize.ofBytes(8640000), Duration.valueOf("10d"), true), "10B/s");
+
+        assertEquals(formatDataRate(DataSize.ofBytes(1), Duration.valueOf("0s"), false), "0B");
+        assertEquals(formatDataRate(DataSize.ofBytes(1), Duration.valueOf("0s"), true), "0B/s");
     }
 
     @Test
