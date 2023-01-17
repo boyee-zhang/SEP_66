@@ -401,12 +401,106 @@ public final class DateTimeUtils
                 // fall through
 
             case SECOND:
-                builder.appendSecondsWithOptionalMillis();
+                builder.append(null, new OptionalSecondsParser());
+                builder.append(null, new OptionalFractionOfSecondParser());
                 parsers.add(builder.toParser());
                 break;
         }
 
         return new PeriodFormatter(builder.toPrinter(), new OrderedPeriodParser(parsers));
+    }
+
+    private static class OptionalSecondsParser
+            implements PeriodParser
+    {
+        private OptionalSecondsParser()
+        {
+        }
+
+        @Override
+        public int parseInto(ReadWritablePeriod period, String periodStr, int position, Locale locale)
+        {
+            int length = periodStr.length();
+
+            int currentPosition = position;
+            while (currentPosition < length) {
+                char currentChar = periodStr.charAt(currentPosition);
+                if (currentChar < '0' || currentChar > '9') {
+                    break;
+                }
+                currentPosition++;
+            }
+
+            if (currentPosition > position) {
+                int seconds = Integer.parseInt(periodStr.substring(position, currentPosition));
+                period.setSeconds(seconds);
+            }
+
+            return currentPosition;
+        }
+    }
+
+    private static class OptionalFractionOfSecondParser
+            implements PeriodParser
+    {
+        private final int maxDigits;
+
+        private OptionalFractionOfSecondParser()
+        {
+            this.maxDigits = 3;
+        }
+
+        /**
+         * @param maxDigits - maximum number of digits that may occur in fraction of second. Note however that only
+         * first three digits are parsed. The rest is ignored because joda-time doesn't provide finer precision.
+         */
+        private OptionalFractionOfSecondParser(int maxDigits)
+        {
+            this.maxDigits = maxDigits;
+        }
+
+        @Override
+        public int parseInto(ReadWritablePeriod period, String periodStr, int position, Locale locale)
+        {
+            int length = periodStr.length();
+
+            // no millis
+            if (length == position) {
+                return position;
+            }
+
+            char decimalSeparator = periodStr.charAt(position);
+            // joda-time parser allows both separators
+            if (decimalSeparator != '.' && decimalSeparator != ',') {
+                return ~position;
+            }
+
+            int firstDigitPosition = position + 1;
+            int currentPosition = firstDigitPosition;
+            while (currentPosition < length) {
+                char currentChar = periodStr.charAt(currentPosition);
+                if (currentChar < '0' || currentChar > '9') {
+                    break;
+                }
+                currentPosition++;
+            }
+
+            int numberOfDigits = currentPosition - firstDigitPosition;
+            if (numberOfDigits > maxDigits) {
+                return ~(firstDigitPosition + maxDigits);
+            }
+
+            int millis = 0;
+            for (int i = 0; i < 3; i++) {
+                millis *= 10;
+                if (numberOfDigits > i) {
+                    millis += periodStr.charAt(firstDigitPosition + i) - '0';
+                }
+            }
+            period.setMillis(millis);
+
+            return currentPosition;
+        }
     }
 
     private static class OrderedPeriodParser
