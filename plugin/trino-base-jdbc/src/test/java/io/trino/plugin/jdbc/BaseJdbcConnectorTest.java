@@ -94,6 +94,7 @@ import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_JOIN_PUSHDOWN_W
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_JOIN_PUSHDOWN_WITH_VARCHAR_INEQUALITY;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_LIMIT_PUSHDOWN;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_PREDICATE_PUSHDOWN;
 import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY;
@@ -1012,34 +1013,6 @@ public abstract class BaseJdbcConnectorTest
     }
 
     @Test
-    public void testArithmeticPredicatePushdown()
-    {
-        if (!hasBehavior(SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN)) {
-            assertThat(query("SELECT shippriority FROM orders WHERE shippriority % 4 = 0")).isNotFullyPushedDown(FilterNode.class);
-            return;
-        }
-        assertThat(query("SELECT shippriority FROM orders WHERE shippriority % 4 = 0")).isFullyPushedDown();
-
-        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) % nationkey = 2"))
-                .isFullyPushedDown()
-                .matches("VALUES (BIGINT '3', CAST('CANADA' AS varchar(25)), BIGINT '1')");
-
-        // some databases calculate remainder instead of modulus when one of the values is negative
-        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) % -nationkey = 2"))
-                .isFullyPushedDown()
-                .matches("VALUES (BIGINT '3', CAST('CANADA' AS varchar(25)), BIGINT '1')");
-
-        assertThatThrownBy(() -> query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) % 0 = 2"))
-                .hasMessageContaining("by zero");
-
-        // Expression that evaluates to 0 for some rows on RHS of modulus
-        assertThatThrownBy(() -> query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) % (regionkey - 1) = 2"))
-                .hasMessageContaining("by zero");
-
-        // TODO add coverage for other arithmetic pushdowns https://github.com/trinodb/trino/issues/14808
-    }
-
-    @Test
     public void testCaseSensitiveTopNPushdown()
     {
         if (!hasBehavior(SUPPORTS_TOPN_PUSHDOWN)) {
@@ -1114,6 +1087,307 @@ public abstract class BaseJdbcConnectorTest
                 "SELECT address FROM customer WHERE address IN ('01bR7OOM6zPqo29DpAq', 'BJYZYJQk4yD5B', 'a6M1wdC44LW')"))
                 .skippingTypesCheck()
                 .matches("VALUES 'BJYZYJQk4yD5B', 'a6M1wdC44LW', '01bR7OOM6zPqo29DpAq'");
+    }
+
+    @Test
+    public void testArithmeticPredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey + 1 = 7"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        // negate
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE -(nationkey) = -7"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE -(nationkey) = 0"))
+                .isFullyPushedDown();
+
+        // additive identity
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey + 0 = nationkey"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey - 0 = nationkey"))
+                .isFullyPushedDown();
+        // additive inverse
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey + (-nationkey) = 0"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey - nationkey = 0"))
+                .isFullyPushedDown();
+
+        // addition and subtraction of constant
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey + 1 = 7"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey - 1 = 7"))
+                .isFullyPushedDown();
+
+        // addition and subtraction of columns
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey + regionkey = 26"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey - regionkey = 23"))
+                .isFullyPushedDown();
+        // addition and subtraction of columns ANDed with another predicate
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE regionkey = 0 AND nationkey + regionkey = 14"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE regionkey = 0 AND nationkey - regionkey = 16"))
+                .isFullyPushedDown();
+
+        // multiplication/division/modulo by zero
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey * 0 != 0"))
+                .isFullyPushedDown();
+        assertThatThrownBy(() -> query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey / 0 = 0"))
+                .satisfies(this::verifyDivisionByZeroFailure);
+        assertThatThrownBy(() -> query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey % 0 = 0"))
+                .satisfies(this::verifyDivisionByZeroFailure);
+        // Expression that evaluates to 0 for some rows on RHS of modulus
+        assertThatThrownBy(() -> query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) / (regionkey - 1) = 2"))
+                .satisfies(this::verifyDivisionByZeroFailure);
+        assertThatThrownBy(() -> query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) % (regionkey - 1) = 2"))
+                .satisfies(this::verifyDivisionByZeroFailure);
+
+        // multiplicative/divisive identity
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey * 1 = nationkey"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey / 1 = nationkey"))
+                .isFullyPushedDown();
+        // multiplicative/divisive inverse
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND nationkey / nationkey = 1"))
+                .isFullyPushedDown();
+
+        // multiplication/division/modulus with a constant
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey * 2 = 40"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey / 2 = 12"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey % 20 = 7"))
+                .isFullyPushedDown();
+
+        // multiplication/division/modulus of columns
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey * regionkey = 40"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT orderkey, custkey FROM orders WHERE orderkey / custkey = 243"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT orderkey, custkey FROM orders WHERE orderkey % custkey = 1470"))
+                .isFullyPushedDown();
+        // multiplication/division/modulus of columns ANDed with another predicate
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE regionkey = 2 AND nationkey * regionkey = 16"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT orderkey, custkey FROM orders WHERE custkey = 223 AND orderkey / custkey = 243"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT orderkey, custkey FROM orders WHERE custkey = 1483 AND orderkey % custkey = 1470"))
+                .isFullyPushedDown();
+
+        // some databases calculate remainder instead of modulus when one of the values is negative
+        assertThat(query("SELECT nationkey, name, regionkey FROM nation WHERE nationkey > 0 AND (nationkey - regionkey) % -nationkey = 2"))
+                .isFullyPushedDown();
+    }
+
+    protected void verifyDivisionByZeroFailure(Throwable e)
+    {
+        throw new UnsupportedOperationException("This method should be overridden");
+    }
+
+    @Test
+    public void testOrPredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT * FROM nation WHERE nationkey = 3 OR regionkey = 4"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        assertThat(query("SELECT * FROM nation WHERE nationkey != 3 OR regionkey = 4")).isFullyPushedDown();
+        assertThat(query("SELECT * FROM nation WHERE nationkey != 3 OR regionkey != 4")).isFullyPushedDown();
+        assertThat(query("SELECT * FROM nation WHERE name = 'ALGERIA' OR regionkey = 4")).isFullyPushedDown();
+        assertThat(query("SELECT * FROM nation WHERE name IS NULL OR regionkey = 4")).isFullyPushedDown();
+        assertThat(query("SELECT * FROM nation WHERE name = NULL OR regionkey = 4")).isNotFullyPushedDown(FilterNode.class); // TODO `name = NULL` should be eliminated by the engine
+    }
+
+    @Test
+    public void testLikePredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE)) {
+            assertThat(query("SELECT nationkey FROM nation WHERE name LIKE '%A%'"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        assertThat(query("SELECT nationkey FROM nation WHERE name LIKE '%A%'"))
+                .isFullyPushedDown();
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_like_predicate_pushdown",
+                "(id integer, a_varchar varchar(1))",
+                List.of(
+                        "1, 'A'",
+                        "2, 'a'",
+                        "3, 'B'",
+                        "4, 'ą'",
+                        "5, 'Ą'"))) {
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE a_varchar LIKE '%A%'"))
+                    .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE a_varchar LIKE '%ą%'"))
+                    .isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testLikeWithEscapePredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE)) {
+            assertThat(query("SELECT nationkey FROM nation WHERE name LIKE '%A%' ESCAPE '\\'"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        assertThat(query("SELECT nationkey FROM nation WHERE name LIKE '%A%' ESCAPE '\\'"))
+                .isFullyPushedDown();
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_like_with_escape_predicate_pushdown",
+                "(id integer, a_varchar varchar(4))",
+                List.of(
+                        "1, 'A%b'",
+                        "2, 'Asth'",
+                        "3, 'ą%b'",
+                        "4, 'ąsth'"))) {
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE a_varchar LIKE '%A\\%%' ESCAPE '\\'"))
+                    .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE a_varchar LIKE '%ą\\%%' ESCAPE '\\'"))
+                    .isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testIsNullExpressionPredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT nationkey FROM nation WHERE name IS NULL OR regionkey = 4"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        // Simple predicate that can be represented as TupleDomain - expected to pass
+        assertThat(query("SELECT nationkey FROM nation WHERE name IS NULL")).isFullyPushedDown();
+
+        assertThat(query("SELECT nationkey FROM nation WHERE name IS NULL OR regionkey = 4")).isFullyPushedDown();
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_is_null_predicate_pushdown",
+                "(a_int integer, a_varchar varchar(1))",
+                List.of(
+                        "1, 'A'",
+                        "2, 'B'",
+                        "1, NULL",
+                        "2, NULL"))) {
+            assertThat(query("SELECT a_int FROM " + table.getName() + " WHERE a_varchar IS NULL OR a_int = 1")).isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testIsNotNullPredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT nationkey FROM nation WHERE name IS NOT NULL OR regionkey = 4"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        assertThat(query("SELECT nationkey FROM nation WHERE name IS NOT NULL OR regionkey = 4")).isFullyPushedDown();
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_is_not_null_predicate_pushdown",
+                "(a_int integer, a_varchar varchar(1))",
+                List.of(
+                        "1, 'A'",
+                        "2, 'B'",
+                        "1, NULL",
+                        "2, NULL"))) {
+            assertThat(query("SELECT a_int FROM " + table.getName() + " WHERE a_varchar IS NOT NULL OR a_int = 1")).isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testNullIfPredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT nationkey FROM nation WHERE NULLIF(name, 'ALGERIA') IS NULL"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        assertThat(query("SELECT nationkey FROM nation WHERE NULLIF(name, 'ALGERIA') IS NULL"))
+                .matches("VALUES BIGINT '0'")
+                .isFullyPushedDown();
+
+        assertThat(query("SELECT name FROM nation WHERE NULLIF(nationkey, 0) IS NULL"))
+                .matches("VALUES CAST('ALGERIA' AS varchar(25))")
+                .isFullyPushedDown();
+
+        assertThat(query("SELECT nationkey FROM nation WHERE NULLIF(name, 'Algeria') IS NULL"))
+                .returnsEmptyResult()
+                .isFullyPushedDown();
+
+        // NULLIF returns the first argument because arguments aren't the same
+        assertThat(query("SELECT nationkey FROM nation WHERE NULLIF(name, 'Name not found') = name"))
+                .matches("SELECT nationkey FROM nation")
+                .isFullyPushedDown();
+    }
+
+    @Test
+    public void testNotExpressionPushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT nationkey FROM nation WHERE NOT(name LIKE '%A%' ESCAPE '\\')"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+        assertThat(query("SELECT nationkey FROM nation WHERE NOT(name LIKE '%A%' ESCAPE '\\')")).isFullyPushedDown();
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_is_not_predicate_pushdown",
+                "(a_int integer, a_varchar varchar(2))",
+                List.of(
+                        "1, 'Aa'",
+                        "2, 'Bb'",
+                        "1, NULL",
+                        "2, NULL"))) {
+            assertThat(query("SELECT a_int FROM " + table.getName() + " WHERE NOT(a_varchar LIKE 'A%') OR a_int = 2")).isFullyPushedDown();
+            assertThat(query("SELECT a_int FROM " + table.getName() + " WHERE NOT(a_varchar LIKE 'A%' OR a_int = 2)")).isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testInPredicatePushdown()
+    {
+        if (!hasBehavior(SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN)) {
+            assertThat(query("SELECT name FROM nation WHERE name IN ('CANADA', comment)"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            return;
+        }
+
+        try (TestTable table = new TestTable(
+                getQueryRunner()::execute,
+                "test_in_predicate_pushdown",
+                "(id varchar(1), id2 varchar(1))",
+                List.of(
+                        "'a', 'b'",
+                        "'b', 'c'",
+                        "'c', 'c'",
+                        "'d', 'd'",
+                        "'a', 'f'"))) {
+            // IN values cannot be represented as a domain
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE id IN ('a', id2)"))
+                    .isFullyPushedDown();
+
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE id IN ('a', 'b') OR id2 IN ('c', 'd')"))
+                    .isFullyPushedDown();
+
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE id IN ('a', 'B') OR id2 IN ('c', 'D')"))
+                    .isFullyPushedDown();
+
+            assertThat(query("SELECT id FROM " + table.getName() + " WHERE id IN ('a', 'B', NULL) OR id2 IN ('C', 'd')"))
+                    // NULL constant value is currently not pushed down
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
     }
 
     @Test
