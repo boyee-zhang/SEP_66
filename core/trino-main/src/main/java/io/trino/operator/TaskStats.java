@@ -52,7 +52,7 @@ public class TaskStats
     private final int blockedDrivers;
     private final int completedDrivers;
 
-    private final double cumulativeUserMemory;
+    private final DataSize cumulativeUserMemory;
     private final DataSize userMemoryReservation;
     private final DataSize peakUserMemoryReservation;
     private final DataSize revocableMemoryReservation;
@@ -109,7 +109,7 @@ public class TaskStats
                 0L,
                 0,
                 0,
-                0.0,
+                DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
@@ -158,7 +158,7 @@ public class TaskStats
             @JsonProperty("blockedDrivers") int blockedDrivers,
             @JsonProperty("completedDrivers") int completedDrivers,
 
-            @JsonProperty("cumulativeUserMemory") double cumulativeUserMemory,
+            @JsonProperty("cumulativeUserMemory") DataSize cumulativeUserMemory,
             @JsonProperty("userMemoryReservation") DataSize userMemoryReservation,
             @JsonProperty("peakUserMemoryReservation") DataSize peakUserMemoryReservation,
             @JsonProperty("revocableMemoryReservation") DataSize revocableMemoryReservation,
@@ -350,7 +350,7 @@ public class TaskStats
     }
 
     @JsonProperty
-    public double getCumulativeUserMemory()
+    public DataSize getCumulativeUserMemory()
     {
         return cumulativeUserMemory;
     }

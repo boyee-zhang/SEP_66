@@ -411,8 +411,7 @@ public class QueryStateMachine
                 stageStats.getRawInputDataSize(),
                 stageStats.getRawInputPositions(),
                 stageStats.getPhysicalInputDataSize(),
-
-                stageStats.getCumulativeUserMemory(),
+                succinctBytes(stageStats.getCumulativeUserMemory().toBytes()),
                 stageStats.getFailedCumulativeUserMemory(),
                 stageStats.getUserMemoryReservation(),
                 stageStats.getTotalMemoryReservation(),
@@ -583,7 +582,7 @@ public class QueryStateMachine
             blockedDrivers += stageStats.getBlockedDrivers();
             completedDrivers += stageStats.getCompletedDrivers();
 
-            cumulativeUserMemory += stageStats.getCumulativeUserMemory();
+            cumulativeUserMemory += stageStats.getCumulativeUserMemory().toBytes();
             failedCumulativeUserMemory += stageStats.getFailedCumulativeUserMemory();
             userMemoryReservation += stageStats.getUserMemoryReservation().toBytes();
             revocableMemoryReservation += stageStats.getRevocableMemoryReservation().toBytes();
@@ -675,7 +674,7 @@ public class QueryStateMachine
                 blockedDrivers,
                 completedDrivers,
 
-                cumulativeUserMemory,
+                succinctBytes(cumulativeUserMemory),
                 failedCumulativeUserMemory,
                 succinctBytes(userMemoryReservation),
                 succinctBytes(revocableMemoryReservation),

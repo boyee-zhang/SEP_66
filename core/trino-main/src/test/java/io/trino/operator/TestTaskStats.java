@@ -49,7 +49,7 @@ public class TestTaskStats
             24,
             10,
 
-            11.0,
+            DataSize.ofBytes(11),
             DataSize.ofBytes(12),
             DataSize.ofBytes(120),
             DataSize.ofBytes(13),
