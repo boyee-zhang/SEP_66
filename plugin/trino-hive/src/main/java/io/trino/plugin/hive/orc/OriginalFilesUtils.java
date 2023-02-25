@@ -20,12 +20,14 @@ import io.trino.orc.OrcDataSource;
 import io.trino.orc.OrcDataSourceId;
 import io.trino.orc.OrcReader;
 import io.trino.orc.OrcReaderOptions;
+import io.trino.orc.StorageOrcFileMetadataProvider;
 import io.trino.plugin.hive.FileFormatDataSourceStats;
 import io.trino.spi.TrinoException;
 import io.trino.spi.security.ConnectorIdentity;
 import org.apache.hadoop.fs.Path;
 
 import java.util.Collection;
+import java.util.Optional;
 
 import static io.trino.orc.OrcReader.createOrcReader;
 import static io.trino.plugin.hive.AcidInfo.OriginalFileInfo;
@@ -83,7 +85,7 @@ public final class OriginalFilesUtils
                     options,
                     inputFile,
                     stats)) {
-                OrcReader reader = createOrcReader(orcDataSource, options)
+                OrcReader reader = createOrcReader(Optional.empty(), orcDataSource, options, StorageOrcFileMetadataProvider.INSTANCE)
                         .orElseThrow(() -> new TrinoException(HIVE_CANNOT_OPEN_SPLIT, "Could not read ORC footer from empty file: " + splitPath));
                 return reader.getFooter().getNumberOfRows();
             }

@@ -19,6 +19,7 @@ import io.trino.orc.OrcPredicate;
 import io.trino.orc.OrcReader;
 import io.trino.orc.OrcReaderOptions;
 import io.trino.orc.OrcRecordReader;
+import io.trino.orc.StorageOrcFileMetadataProvider;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.Type;
@@ -26,6 +27,7 @@ import io.trino.spi.type.Type;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.List;
+import java.util.Optional;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcReader.INITIAL_BATCH_SIZE;
@@ -43,7 +45,7 @@ public class TempFileReader
         requireNonNull(types, "types is null");
 
         try {
-            OrcReader orcReader = OrcReader.createOrcReader(dataSource, new OrcReaderOptions())
+            OrcReader orcReader = OrcReader.createOrcReader(Optional.empty(), dataSource, new OrcReaderOptions(), StorageOrcFileMetadataProvider.INSTANCE)
                     .orElseThrow(() -> new TrinoException(HIVE_WRITER_DATA_ERROR, "Temporary data file is empty"));
             reader = orcReader.createRecordReader(
                     orcReader.getRootColumn().getNestedColumns(),
