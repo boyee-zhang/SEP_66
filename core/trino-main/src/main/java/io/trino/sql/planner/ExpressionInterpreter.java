@@ -52,6 +52,7 @@ import io.trino.sql.PlannerContext;
 import io.trino.sql.analyzer.ExpressionAnalyzer;
 import io.trino.sql.analyzer.Scope;
 import io.trino.sql.analyzer.TypeSignatureProvider;
+import io.trino.sql.planner.iterative.rule.PushPredicateIntoTableScan;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.ArithmeticUnaryExpression;
 import io.trino.sql.tree.Array;
@@ -159,7 +160,9 @@ import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
 import static io.trino.sql.planner.FunctionCallBuilder.resolve;
 import static io.trino.sql.planner.ResolvedFunctionCallRewriter.rewriteResolvedFunctions;
 import static io.trino.sql.planner.iterative.rule.CanonicalizeExpressionRewriter.canonicalizeExpression;
+import static io.trino.sql.planner.iterative.rule.PushPredicateIntoTableScan.splitExpression;
 import static io.trino.sql.tree.ArithmeticUnaryExpression.Sign.MINUS;
+import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static io.trino.sql.tree.DereferenceExpression.isQualifiedAllFieldsReference;
 import static io.trino.type.LikeFunctions.isLikePattern;
 import static io.trino.type.LikeFunctions.unescapeLiteralLikePattern;
@@ -181,12 +184,13 @@ public class ExpressionInterpreter
     private final Map<NodeRef<Expression>, Type> expressionTypes;
     private final InterpretedFunctionInvoker functionInvoker;
     private final TypeCoercion typeCoercion;
+    private final TypeProvider typeProvider;
 
     // identity-based cache for LIKE expressions with constant pattern and escape char
     private final IdentityHashMap<LikePredicate, LikeMatcher> likePatternCache = new IdentityHashMap<>();
     private final IdentityHashMap<InListExpression, Set<?>> inListCache = new IdentityHashMap<>();
 
-    public ExpressionInterpreter(Expression expression, PlannerContext plannerContext, Session session, Map<NodeRef<Expression>, Type> expressionTypes)
+    public ExpressionInterpreter(Expression expression, PlannerContext plannerContext, Session session, Map<NodeRef<Expression>, Type> expressionTypes, TypeProvider typeProvider)
     {
         this.expression = requireNonNull(expression, "expression is null");
         this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
@@ -199,6 +203,7 @@ public class ExpressionInterpreter
         verify((expressionTypes.containsKey(NodeRef.of(expression))));
         this.functionInvoker = new InterpretedFunctionInvoker(plannerContext.getFunctionManager());
         this.typeCoercion = new TypeCoercion(plannerContext.getTypeManager()::getType);
+        this.typeProvider = requireNonNull(typeProvider, "typeProvider is null");
     }
 
     public static Object evaluateConstantExpression(
@@ -268,7 +273,7 @@ public class ExpressionInterpreter
         analyzer.analyze(resolved, Scope.create());
 
         // evaluate the expression
-        return new ExpressionInterpreter(resolved, plannerContext, session, analyzer.getExpressionTypes()).evaluate();
+        return new ExpressionInterpreter(resolved, plannerContext, session, analyzer.getExpressionTypes(), TypeProvider.empty()).evaluate();
     }
 
     public Type getType()
@@ -965,6 +970,26 @@ public class ExpressionInterpreter
         @Override
         protected Object visitLogicalExpression(LogicalExpression node, Object context)
         {
+            // Try simplifying expressions using TupleDomain, e.g. a > 1 and a > 2 => a > 2
+            PushPredicateIntoTableScan.SplitExpression splitExpression = splitExpression(plannerContext, node);
+            if (splitExpression.getNonDeterministicPredicate() == TRUE_LITERAL) {
+                DomainTranslator.ExtractionResult decomposedPredicate = DomainTranslator.getExtractionResult(
+                        plannerContext,
+                        session,
+                        splitExpression.getDeterministicPredicate(),
+                        typeProvider);
+                DomainTranslator domainTranslator = new DomainTranslator(plannerContext);
+                if (decomposedPredicate.getRemainingExpression() == TRUE_LITERAL) {
+                    if (decomposedPredicate.getTupleDomain().isNone()) {
+                        return false;
+                    }
+                    else if (decomposedPredicate.getTupleDomain().isAll()) {
+                        return true;
+                    }
+                    return domainTranslator.toPredicate(session, decomposedPredicate.getTupleDomain());
+                }
+            }
+
             List<Object> terms = new ArrayList<>();
             List<Type> types = new ArrayList<>();
 

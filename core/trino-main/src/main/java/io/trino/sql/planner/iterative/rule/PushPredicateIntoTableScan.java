@@ -285,7 +285,7 @@ public class PushPredicateIntoTableScan
             Map<NodeRef<Expression>, Type> translatedExpressionTypes = typeAnalyzer.getTypes(session, symbolAllocator.getTypes(), translatedExpression);
             translatedExpression = literalEncoder.toExpression(
                     session,
-                    new ExpressionInterpreter(translatedExpression, plannerContext, session, translatedExpressionTypes)
+                    new ExpressionInterpreter(translatedExpression, plannerContext, session, translatedExpressionTypes, symbolAllocator.getTypes())
                             .optimize(NoOpSymbolResolver.INSTANCE),
                     translatedExpressionTypes.get(NodeRef.of(translatedExpression)));
             remainingDecomposedPredicate = combineConjuncts(plannerContext.getMetadata(), translatedExpression, expressionTranslation.remainingExpression());
@@ -326,7 +326,7 @@ public class PushPredicateIntoTableScan
         verify(newTablePartitioning.equals(oldTablePartitioning), "Partitioning must not change after predicate is pushed down");
     }
 
-    private static SplitExpression splitExpression(PlannerContext plannerContext, Expression predicate)
+    public static SplitExpression splitExpression(PlannerContext plannerContext, Expression predicate)
     {
         Metadata metadata = plannerContext.getMetadata();
 
@@ -416,7 +416,7 @@ public class PushPredicateIntoTableScan
         return TupleDomain.withColumnDomains(enforcedDomainsBuilder.buildOrThrow());
     }
 
-    private static class SplitExpression
+    public static class SplitExpression
     {
         private final Expression dynamicFilter;
         private final Expression deterministicPredicate;
