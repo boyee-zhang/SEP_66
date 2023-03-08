@@ -288,7 +288,7 @@ public final class IcebergUtil
                 .findFirst();
     }
 
-    public static List<IcebergColumnHandle> getColumns(Schema schema, TypeManager typeManager)
+    public static List<IcebergColumnHandle> getTopLevelColumns(Schema schema, TypeManager typeManager)
     {
         return schema.columns().stream()
                 .map(column -> getColumnHandle(column, typeManager))
