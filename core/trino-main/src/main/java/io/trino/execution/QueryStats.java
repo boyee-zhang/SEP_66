@@ -53,6 +53,8 @@ public class QueryStats
     private final Duration executionTime;
     private final Duration analysisTime;
     private final Duration planningTime;
+    private final Duration schedulingTime;
+    private final Duration runningTime;
     private final Duration finishingTime;
 
     private final int totalTasks;
@@ -144,6 +146,8 @@ public class QueryStats
             @JsonProperty("executionTime") Duration executionTime,
             @JsonProperty("analysisTime") Duration analysisTime,
             @JsonProperty("planningTime") Duration planningTime,
+            @JsonProperty("schedulingTime") Duration schedulingTime,
+            @JsonProperty("runningTime") Duration runningTime,
             @JsonProperty("finishingTime") Duration finishingTime,
 
             @JsonProperty("totalTasks") int totalTasks,
@@ -233,6 +237,8 @@ public class QueryStats
         this.executionTime = requireNonNull(executionTime, "executionTime is null");
         this.analysisTime = requireNonNull(analysisTime, "analysisTime is null");
         this.planningTime = requireNonNull(planningTime, "planningTime is null");
+        this.schedulingTime = requireNonNull(schedulingTime, "schedulingTime is null");
+        this.runningTime = requireNonNull(runningTime, "runningTime is null");
         this.finishingTime = requireNonNull(finishingTime, "finishingTime is null");
 
         checkArgument(totalTasks >= 0, "totalTasks is negative");
@@ -394,6 +400,18 @@ public class QueryStats
     public Duration getPlanningTime()
     {
         return planningTime;
+    }
+
+    @JsonProperty
+    public Duration getSchedulingTime()
+    {
+        return schedulingTime;
+    }
+
+    @JsonProperty
+    public Duration getRunningTime()
+    {
+        return runningTime;
     }
 
     @JsonProperty

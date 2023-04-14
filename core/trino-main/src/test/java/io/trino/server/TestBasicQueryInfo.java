@@ -69,6 +69,8 @@ public class TestBasicQueryInfo
                                 new Duration(9, MINUTES),
                                 new Duration(99, SECONDS),
                                 new Duration(12, MINUTES),
+                                new Duration(99, SECONDS),
+                                new Duration(12, MINUTES),
                                 13,
                                 14,
                                 15,
