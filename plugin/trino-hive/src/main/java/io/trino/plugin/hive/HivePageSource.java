@@ -512,7 +512,7 @@ public class HivePageSource
         }
     }
 
-    private static final class CoercionLazyBlockLoader
+    public static final class CoercionLazyBlockLoader
             implements LazyBlockLoader
     {
         private final Function<Block, Block> coercer;

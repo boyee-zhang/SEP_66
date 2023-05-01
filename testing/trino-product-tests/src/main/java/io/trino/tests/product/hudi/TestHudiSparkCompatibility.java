@@ -290,6 +290,66 @@ public class TestHudiSparkCompatibility
     }
 
     @Test(groups = {HUDI, PROFILE_SPECIFIC_TESTS})
+    public void testCopyOnWriteTableSchemaEvolution()
+    {
+        String tableName = "test_hudi_cow_schema_evolution_" + randomNameSuffix();
+
+        createNonPartitionedTable(tableName, COW_TABLE_TYPE);
+        try {
+            onHudi().executeQuery("SET hoodie.schema.on.read.enable=true");
+            onHudi().executeQuery("ALTER TABLE default." + tableName + " ADD COLUMNS(new_col_0 STRING)");
+            onHudi().executeQuery("INSERT INTO default." + tableName + " VALUES (3, 'a3', 30, 3000, 'row 3')");
+
+            assertThat(onTrino().executeQuery("SELECT id, name, price, ts, new_col_0 FROM hudi.default." + tableName))
+                    .containsOnly(ImmutableList.of(
+                            row(1, "a1", 20, 1000, null),
+                            row(2, "a2", 40, 2000, null),
+                            row(3, "a3", 30, 3000, "row 3")));
+
+            onHudi().executeQuery("ALTER TABLE default." + tableName + " RENAME COLUMN new_col_0 TO col_0");
+
+            assertThat(onTrino().executeQuery("SELECT id, name, price, ts, col_0 FROM hudi.default." + tableName))
+                    .containsOnly(ImmutableList.of(
+                            row(1, "a1", 20, 1000, null),
+                            row(2, "a2", 40, 2000, null),
+                            row(3, "a3", 30, 3000, "row 3")));
+
+            assertQueryFailure(() -> onTrino().executeQuery("SELECT id, name, price, ts, new_col_0 FROM hudi.default." + tableName))
+                    .hasMessageContaining("Column 'new_col_0' cannot be resolved");
+
+            onHudi().executeQuery("INSERT INTO default." + tableName + " VALUES (4, 'a4', 40, 4000, 'row 4')");
+            assertThat(onTrino().executeQuery("SELECT id, name, price, ts, col_0 FROM hudi.default." + tableName))
+                    .containsOnly(ImmutableList.of(
+                            row(1, "a1", 20, 1000, null),
+                            row(2, "a2", 40, 2000, null),
+                            row(3, "a3", 30, 3000, "row 3"),
+                            row(4, "a4", 40, 4000, "row 4")));
+
+            onHudi().executeQuery("ALTER TABLE default." + tableName + " DROP COLUMN col_0");
+            assertQueryFailure(() -> onTrino().executeQuery("SELECT id, name, price, ts, col_0 FROM hudi.default." + tableName))
+                    .hasMessageContaining("Column 'col_0' cannot be resolved");
+
+            assertThat(onTrino().executeQuery("SELECT id, name, price, ts FROM hudi.default." + tableName))
+                    .containsOnly(ImmutableList.of(
+                            row(1, "a1", 20, 1000),
+                            row(2, "a2", 40, 2000),
+                            row(3, "a3", 30, 3000),
+                            row(4, "a4", 40, 4000)));
+
+            onHudi().executeQuery("ALTER TABLE default." + tableName + " ADD COLUMNS(col_0 STRING)");
+            assertThat(onTrino().executeQuery("SELECT id, name, price, ts, col_0 FROM hudi.default." + tableName))
+                    .containsOnly(ImmutableList.of(
+                            row(1, "a1", 20, 1000, null),
+                            row(2, "a2", 40, 2000, null),
+                            row(3, "a3", 30, 3000, "row 3"),
+                            row(4, "a4", 40, 4000, "row 4")));
+        }
+        finally {
+            onHudi().executeQuery("DROP TABLE default." + tableName);
+        }
+    }
+
+    @Test(groups = {HUDI, PROFILE_SPECIFIC_TESTS})
     public void testTimelineTable()
     {
         String tableName = "test_hudi_timeline_system_table_" + randomNameSuffix();
