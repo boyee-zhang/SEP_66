@@ -150,6 +150,8 @@ public final class JoinTestUtils
                 taskContext.getSession(),
                 partitionCount,
                 FIXED_HASH_DISTRIBUTION,
+                false,
+                false,
                 hashChannels,
                 hashChannelTypes,
                 buildPages.getHashChannel(),

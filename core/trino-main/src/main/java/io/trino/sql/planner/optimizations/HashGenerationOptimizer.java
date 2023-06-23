@@ -32,7 +32,6 @@ import io.trino.metadata.Metadata;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.sql.planner.FunctionCallBuilder;
-import io.trino.sql.planner.Partitioning.ArgumentBinding;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.PlanNodeIdAllocator;
@@ -88,7 +87,6 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.metadata.OperatorNameUtil.mangleOperatorName;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_HASH_DISTRIBUTION;
 import static io.trino.sql.planner.plan.ChildReplacer.replaceChildren;
 import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
 import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
@@ -520,12 +518,10 @@ public class HashGenerationOptimizer
             PartitioningScheme partitioningScheme = node.getPartitioningScheme();
             PartitioningHandle partitioningHandle = partitioningScheme.getPartitioning().getHandle();
 
-            if ((partitioningHandle.equals(FIXED_HASH_DISTRIBUTION)
-                    || partitioningHandle.equals(SCALED_WRITER_HASH_DISTRIBUTION))
-                    && partitioningScheme.getPartitioning().getArguments().stream().allMatch(ArgumentBinding::isVariable)) {
+            if (partitioningHandle.equals(FIXED_HASH_DISTRIBUTION) && partitioningScheme.getPartitioning().getArguments().stream().allMatch(PartitioningArgument::isVariable)) {
                 // add precomputed hash for exchange
                 partitionSymbols = computeHash(partitioningScheme.getPartitioning().getArguments().stream()
-                        .map(ArgumentBinding::getColumn)
+                        .map(PartitioningArgument::getColumn)
                         .collect(toImmutableList()));
                 preference = preference.withHashComputation(partitionSymbols);
             }
@@ -547,7 +543,6 @@ public class HashGenerationOptimizer
                                     .collect(toImmutableList()))
                             .build(),
                     partitionSymbols.map(newHashSymbols::get),
-                    partitioningScheme.isReplicateNullsAndAny(),
                     partitioningScheme.getBucketToPartition(),
                     partitioningScheme.getPartitionCount());
 
@@ -587,7 +582,8 @@ public class HashGenerationOptimizer
                             partitioningScheme,
                             newSources.build(),
                             newInputs.build(),
-                            node.getOrderingScheme()),
+                            node.getOrderingScheme(),
+                            node.isScaleWriters()),
                     newHashSymbols);
         }
 

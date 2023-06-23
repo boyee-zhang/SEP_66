@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import io.trino.spi.connector.LocalProperty;
 import io.trino.sql.planner.Partitioning;
+import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.Symbol;
 
 import javax.annotation.concurrent.Immutable;
@@ -29,23 +30,23 @@ import java.util.Set;
 import java.util.function.Function;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
 
 class PreferredProperties
 {
-    private final Optional<Global> globalProperties;
+    private final Optional<PartitioningProperties> nodePartitioning;
     private final List<LocalProperty<Symbol>> localProperties;
 
     private PreferredProperties(
-            Optional<Global> globalProperties,
+            Optional<PartitioningProperties> nodePartitioning,
             List<? extends LocalProperty<Symbol>> localProperties)
     {
-        requireNonNull(globalProperties, "globalProperties is null");
+        requireNonNull(nodePartitioning, "nodePartitioning is null");
         requireNonNull(localProperties, "localProperties is null");
 
-        this.globalProperties = globalProperties;
+        this.nodePartitioning = nodePartitioning;
         this.localProperties = ImmutableList.copyOf(localProperties);
     }
 
@@ -57,63 +58,49 @@ class PreferredProperties
     public static PreferredProperties undistributed()
     {
         return builder()
-                .global(Global.undistributed())
+                .nodePartitioning(PartitioningProperties.singlePartition())
                 .build();
     }
 
     public static PreferredProperties partitioned(Set<Symbol> columns)
     {
         return builder()
-                .global(Global.distributed(PartitioningProperties.partitioned(columns)))
+                .nodePartitioning(PartitioningProperties.partitioned(columns))
                 .build();
     }
 
     public static PreferredProperties partitionedWithNullsAndAnyReplicated(Set<Symbol> columns)
     {
         return builder()
-                .global(Global.distributed(PartitioningProperties.partitioned(columns).withNullsAndAnyReplicated(true)))
-                .build();
-    }
-
-    public static PreferredProperties distributed()
-    {
-        return builder()
-                .global(Global.distributed())
+                .nodePartitioning(PartitioningProperties.partitioned(columns, true))
                 .build();
     }
 
     public static PreferredProperties partitioned(Partitioning partitioning)
     {
         return builder()
-                .global(Global.distributed(PartitioningProperties.partitioned(partitioning)))
-                .build();
-    }
-
-    public static PreferredProperties partitionedWithNullsAndAnyReplicated(Partitioning partitioning)
-    {
-        return builder()
-                .global(Global.distributed(PartitioningProperties.partitioned(partitioning).withNullsAndAnyReplicated(true)))
+                .nodePartitioning(PartitioningProperties.partitioned(partitioning))
                 .build();
     }
 
     public static PreferredProperties partitionedWithLocal(Set<Symbol> columns, List<? extends LocalProperty<Symbol>> localProperties)
     {
         return builder()
-                .global(Global.distributed(PartitioningProperties.partitioned(columns)))
-                .local(localProperties)
+                .nodePartitioning(PartitioningProperties.partitioned(columns))
+                .localProperties(localProperties)
                 .build();
     }
 
     public static PreferredProperties local(List<? extends LocalProperty<Symbol>> localProperties)
     {
         return builder()
-                .local(localProperties)
+                .localProperties(localProperties)
                 .build();
     }
 
-    public Optional<Global> getGlobalProperties()
+    public Optional<PartitioningProperties> getNodePartitioning()
     {
-        return globalProperties;
+        return nodePartitioning;
     }
 
     public List<LocalProperty<Symbol>> getLocalProperties()
@@ -129,17 +116,17 @@ class PreferredProperties
                 .build();
 
         Builder builder = builder()
-                .local(newLocal);
+                .localProperties(newLocal);
 
-        if (globalProperties.isPresent()) {
-            Global currentGlobal = globalProperties.get();
-            Global newGlobal = parent.getGlobalProperties()
-                    .map(currentGlobal::mergeWithParent)
-                    .orElse(currentGlobal);
-            builder.global(newGlobal);
+        if (nodePartitioning.isPresent()) {
+            PartitioningProperties current = nodePartitioning.get();
+            PartitioningProperties merged = parent.getNodePartitioning()
+                    .map(current::mergeWithParent)
+                    .orElse(current);
+            builder.nodePartitioning(merged);
         }
         else {
-            builder.global(parent.getGlobalProperties());
+            parent.getNodePartitioning().ifPresent(builder::nodePartitioning);
         }
 
         return builder.build();
@@ -147,9 +134,9 @@ class PreferredProperties
 
     public PreferredProperties translate(Function<Symbol, Optional<Symbol>> translator)
     {
-        Optional<Global> newGlobalProperties = globalProperties.map(global -> global.translate(translator));
+        Optional<PartitioningProperties> newNodePartitioning = nodePartitioning.flatMap(partitioning -> partitioning.translate(translator));
         List<LocalProperty<Symbol>> newLocalProperties = LocalProperties.translate(localProperties, translator);
-        return new PreferredProperties(newGlobalProperties, newLocalProperties);
+        return new PreferredProperties(newNodePartitioning, newLocalProperties);
     }
 
     public static Builder builder()
@@ -159,168 +146,60 @@ class PreferredProperties
 
     public static class Builder
     {
-        private Optional<Global> globalProperties = Optional.empty();
+        private Optional<PartitioningProperties> nodePartitioning = Optional.empty();
         private List<LocalProperty<Symbol>> localProperties = ImmutableList.of();
 
-        public Builder global(Global globalProperties)
+        public Builder nodePartitioning(PartitioningProperties nodePartitioning)
         {
-            this.globalProperties = Optional.of(globalProperties);
+            this.nodePartitioning = Optional.of(nodePartitioning);
             return this;
         }
 
-        public Builder global(Optional<Global> globalProperties)
-        {
-            this.globalProperties = globalProperties;
-            return this;
-        }
-
-        public Builder global(PreferredProperties other)
-        {
-            this.globalProperties = other.globalProperties;
-            return this;
-        }
-
-        public Builder local(List<? extends LocalProperty<Symbol>> localProperties)
+        public Builder localProperties(List<? extends LocalProperty<Symbol>> localProperties)
         {
             this.localProperties = ImmutableList.copyOf(localProperties);
             return this;
         }
 
-        public Builder local(PreferredProperties other)
-        {
-            this.localProperties = ImmutableList.copyOf(other.localProperties);
-            return this;
-        }
-
         public PreferredProperties build()
         {
-            return new PreferredProperties(globalProperties, localProperties);
-        }
-    }
-
-    @Immutable
-    public static final class Global
-    {
-        private final boolean distributed;
-        private final Optional<PartitioningProperties> partitioningProperties; // if missing => partitioned with some unknown scheme
-
-        private Global(boolean distributed, Optional<PartitioningProperties> partitioningProperties)
-        {
-            this.distributed = distributed;
-            this.partitioningProperties = requireNonNull(partitioningProperties, "partitioningProperties is null");
-        }
-
-        public static Global undistributed()
-        {
-            return new Global(false, Optional.of(PartitioningProperties.singlePartition()));
-        }
-
-        public static Global distributed(Optional<PartitioningProperties> partitioningProperties)
-        {
-            return new Global(true, partitioningProperties);
-        }
-
-        public static Global distributed()
-        {
-            return distributed(Optional.empty());
-        }
-
-        public static Global distributed(PartitioningProperties partitioning)
-        {
-            return distributed(Optional.of(partitioning));
-        }
-
-        public boolean isDistributed()
-        {
-            return distributed;
-        }
-
-        public Optional<PartitioningProperties> getPartitioningProperties()
-        {
-            return partitioningProperties;
-        }
-
-        public Global mergeWithParent(Global parent)
-        {
-            if (distributed != parent.distributed) {
-                return this;
-            }
-            if (partitioningProperties.isEmpty()) {
-                return parent;
-            }
-            if (parent.partitioningProperties.isEmpty()) {
-                return this;
-            }
-            return new Global(distributed, Optional.of(partitioningProperties.get().mergeWithParent(parent.partitioningProperties.get())));
-        }
-
-        public Global translate(Function<Symbol, Optional<Symbol>> translator)
-        {
-            if (!isDistributed()) {
-                return this;
-            }
-            return distributed(partitioningProperties.flatMap(properties -> properties.translate(translator)));
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Objects.hash(distributed, partitioningProperties);
-        }
-
-        @Override
-        public boolean equals(Object obj)
-        {
-            if (this == obj) {
-                return true;
-            }
-            if (obj == null || getClass() != obj.getClass()) {
-                return false;
-            }
-            Global other = (Global) obj;
-            return Objects.equals(this.distributed, other.distributed)
-                    && Objects.equals(this.partitioningProperties, other.partitioningProperties);
-        }
-
-        @Override
-        public String toString()
-        {
-            return toStringHelper(this)
-                    .add("distributed", distributed)
-                    .add("partitioningProperties", partitioningProperties)
-                    .toString();
+            return new PreferredProperties(nodePartitioning, localProperties);
         }
     }
 
     @Immutable
     public static final class PartitioningProperties
     {
-        private final Set<Symbol> partitioningColumns;
-        private final Optional<Partitioning> partitioning; // Specific partitioning requested
+        private final Optional<PartitioningHandle> handle;
+        private final List<PartitioningArgument> arguments;
         private final boolean nullsAndAnyReplicated;
 
-        private PartitioningProperties(Set<Symbol> partitioningColumns, Optional<Partitioning> partitioning, boolean nullsAndAnyReplicated)
+        private PartitioningProperties(Optional<PartitioningHandle> handle, List<PartitioningArgument> arguments, boolean nullsAndAnyReplicated)
         {
-            this.partitioningColumns = ImmutableSet.copyOf(requireNonNull(partitioningColumns, "partitioningColumns is null"));
-            this.partitioning = requireNonNull(partitioning, "partitioning is null");
+            this.handle = requireNonNull(handle, "handle is null");
+            this.arguments = ImmutableList.copyOf(requireNonNull(arguments, "arguments is null"));
             this.nullsAndAnyReplicated = nullsAndAnyReplicated;
-
-            checkArgument(partitioning.isEmpty() || partitioning.get().getColumns().equals(partitioningColumns), "Partitioning input must match partitioningColumns");
-        }
-
-        public PartitioningProperties withNullsAndAnyReplicated(boolean nullsAndAnyReplicated)
-        {
-            return new PartitioningProperties(partitioningColumns, partitioning, nullsAndAnyReplicated);
         }
 
         public static PartitioningProperties partitioned(Partitioning partitioning)
         {
-            return new PartitioningProperties(partitioning.getColumns(), Optional.of(partitioning), false);
+            return new PartitioningProperties(Optional.of(partitioning.getHandle()), partitioning.getArguments(), partitioning.isNullsAndAnyReplicated());
         }
 
         public static PartitioningProperties partitioned(Set<Symbol> columns)
         {
-            return new PartitioningProperties(columns, Optional.empty(), false);
+            return partitioned(columns, false);
+        }
+
+        public static PartitioningProperties partitioned(Set<Symbol> columns, boolean nullsAndAnyReplicated)
+        {
+            return new PartitioningProperties(
+                    Optional.empty(),
+                    columns.stream()
+                            .map(Symbol::toSymbolReference)
+                            .map(PartitioningArgument::expressionArgument)
+                            .collect(toImmutableList()),
+                    nullsAndAnyReplicated);
         }
 
         public static PartitioningProperties singlePartition()
@@ -330,12 +209,20 @@ class PreferredProperties
 
         public Set<Symbol> getPartitioningColumns()
         {
-            return partitioningColumns;
+            return arguments.stream()
+                    .filter(PartitioningArgument::isVariable)
+                    .map(PartitioningArgument::getColumn)
+                    .collect(toImmutableSet());
         }
 
-        public Optional<Partitioning> getPartitioning()
+        public Optional<PartitioningHandle> getHandle()
         {
-            return partitioning;
+            return handle;
+        }
+
+        public List<PartitioningArgument> getArguments()
+        {
+            return arguments;
         }
 
         public boolean isNullsAndAnyReplicated()
@@ -343,10 +230,15 @@ class PreferredProperties
             return nullsAndAnyReplicated;
         }
 
+        public boolean isDistributed()
+        {
+            return arguments.stream().anyMatch(PartitioningArgument::isVariable);
+        }
+
         public PartitioningProperties mergeWithParent(PartitioningProperties parent)
         {
             // Non-negotiable if we require a specific partitioning
-            if (partitioning.isPresent()) {
+            if (handle.isPresent()) {
                 return this;
             }
 
@@ -355,46 +247,44 @@ class PreferredProperties
                 return this;
             }
 
-            if (parent.partitioning.isPresent()) {
+            if (parent.getHandle().isPresent()) {
                 // If the parent has a partitioning preference, propagate parent only if the parent's partitioning columns satisfies our preference.
                 // Otherwise, ignore the parent since the parent will have to repartition anyways.
-                return partitioningColumns.containsAll(parent.partitioningColumns) ? parent : this;
+                return getPartitioningColumns().containsAll(parent.getPartitioningColumns()) ? parent : this;
             }
 
             // Otherwise partition on any common columns if available
-            Set<Symbol> common = Sets.intersection(partitioningColumns, parent.partitioningColumns);
-            return common.isEmpty() ? this : partitioned(common).withNullsAndAnyReplicated(nullsAndAnyReplicated);
+            Set<Symbol> common = Sets.intersection(getPartitioningColumns(), parent.getPartitioningColumns());
+            return common.isEmpty() ? this : partitioned(common, nullsAndAnyReplicated);
         }
 
         public Optional<PartitioningProperties> translate(Function<Symbol, Optional<Symbol>> translator)
         {
-            Set<Symbol> newPartitioningColumns = partitioningColumns.stream()
-                    .map(translator)
+            PartitioningArgument.Translator argumentTranslator = new PartitioningArgument.Translator(translator, symbol -> Optional.empty(), coalesceSymbols -> Optional.empty());
+
+            List<PartitioningArgument> translatedArguments = arguments.stream()
+                    .map(argument -> argument.translate(argumentTranslator))
                     .filter(Optional::isPresent)
                     .map(Optional::get)
-                    .collect(toImmutableSet());
+                    .collect(toImmutableList());
 
             // Translation fails if we have prior partitioning columns and none could be translated
-            if (!partitioningColumns.isEmpty() && newPartitioningColumns.isEmpty()) {
+            if (!arguments.isEmpty() && translatedArguments.isEmpty()) {
                 return Optional.empty();
             }
 
-            if (partitioning.isEmpty()) {
-                return Optional.of(new PartitioningProperties(newPartitioningColumns, Optional.empty(), nullsAndAnyReplicated));
-            }
-
-            Optional<Partitioning> newPartitioning = partitioning.get().translate(new Partitioning.Translator(translator, symbol -> Optional.empty(), coalesceSymbols -> Optional.empty()));
-            if (newPartitioning.isEmpty()) {
+            if (handle.isPresent() && translatedArguments.size() != arguments.size()) {
+                // specific partitioning is requested, arguments cannot be lost
                 return Optional.empty();
             }
 
-            return Optional.of(new PartitioningProperties(newPartitioningColumns, newPartitioning, nullsAndAnyReplicated));
+            return Optional.of(new PartitioningProperties(handle, translatedArguments, nullsAndAnyReplicated));
         }
 
         @Override
         public int hashCode()
         {
-            return Objects.hash(partitioningColumns, partitioning, nullsAndAnyReplicated);
+            return Objects.hash(handle, arguments, nullsAndAnyReplicated);
         }
 
         @Override
@@ -407,8 +297,8 @@ class PreferredProperties
                 return false;
             }
             PartitioningProperties other = (PartitioningProperties) obj;
-            return Objects.equals(this.partitioningColumns, other.partitioningColumns)
-                    && Objects.equals(this.partitioning, other.partitioning)
+            return Objects.equals(this.handle, other.handle)
+                    && Objects.equals(this.arguments, other.arguments)
                     && this.nullsAndAnyReplicated == other.nullsAndAnyReplicated;
         }
 
@@ -416,8 +306,8 @@ class PreferredProperties
         public String toString()
         {
             return toStringHelper(this)
-                    .add("partitioningColumns", partitioningColumns)
-                    .add("partitioning", partitioning)
+                    .add("handle", handle)
+                    .add("arguments", arguments)
                     .add("nullsAndAnyReplicated", nullsAndAnyReplicated)
                     .toString();
         }

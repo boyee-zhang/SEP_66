@@ -22,10 +22,10 @@ import io.trino.spi.function.AggregationFunctionMetadata;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.sql.PlannerContext;
-import io.trino.sql.planner.Partitioning;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
+import io.trino.sql.planner.optimizations.PartitioningArgument;
 import io.trino.sql.planner.optimizations.SymbolMapper;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.Assignments;
@@ -108,7 +108,7 @@ public class PushPartialAggregationThroughExchange
         // partial aggregation can only be pushed through exchange that doesn't change
         // the cardinality of the stream (i.e., gather or repartition)
         if ((exchangeNode.getType() != GATHER && exchangeNode.getType() != REPARTITION) ||
-                exchangeNode.getPartitioningScheme().isReplicateNullsAndAny()) {
+                exchangeNode.getPartitioningScheme().getPartitioning().isNullsAndAnyReplicated()) {
             return Result.empty();
         }
 
@@ -119,8 +119,8 @@ public class PushPartialAggregationThroughExchange
                     .getPartitioning()
                     .getArguments()
                     .stream()
-                    .filter(Partitioning.ArgumentBinding::isVariable)
-                    .map(Partitioning.ArgumentBinding::getColumn)
+                    .filter(PartitioningArgument::isVariable)
+                    .map(PartitioningArgument::getColumn)
                     .collect(Collectors.toList());
 
             if (!aggregationNode.getGroupingKeys().containsAll(partitioningColumns)) {
@@ -177,7 +177,6 @@ public class PushPartialAggregationThroughExchange
                 exchange.getPartitioningScheme().getPartitioning(),
                 aggregation.getOutputSymbols(),
                 exchange.getPartitioningScheme().getHashColumn(),
-                exchange.getPartitioningScheme().isReplicateNullsAndAny(),
                 exchange.getPartitioningScheme().getBucketToPartition(),
                 exchange.getPartitioningScheme().getPartitionCount());
 
@@ -188,7 +187,8 @@ public class PushPartialAggregationThroughExchange
                 partitioning,
                 partials,
                 ImmutableList.copyOf(Collections.nCopies(partials.size(), aggregation.getOutputSymbols())),
-                Optional.empty());
+                Optional.empty(),
+                exchange.isScaleWriters());
     }
 
     private PlanNode split(AggregationNode node, Context context)

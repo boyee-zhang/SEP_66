@@ -134,10 +134,8 @@ import static io.trino.spi.StandardErrorCode.CLUSTER_OUT_OF_MEMORY;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NO_NODES_AVAILABLE;
 import static io.trino.spi.StandardErrorCode.REMOTE_TASK_FAILED;
-import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_BROADCAST_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SOURCE_DISTRIBUTION;
 import static io.trino.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
 import static io.trino.sql.planner.plan.ExchangeNode.Type.REPLICATE;
@@ -852,8 +850,7 @@ public class PipelinedQueryScheduler
             Function<PartitioningKey, NodePartitionMap> partitioningCache = partitioningKey ->
                     partitioningCacheMap.computeIfAbsent(partitioningKey, partitioning -> nodePartitioningManager.getNodePartitioningMap(
                             queryStateMachine.getSession(),
-                            // TODO: support hash distributed writer scaling (https://github.com/trinodb/trino/issues/10791)
-                            partitioning.handle.equals(SCALED_WRITER_HASH_DISTRIBUTION) ? FIXED_HASH_DISTRIBUTION : partitioning.handle,
+                            partitioning.handle,
                             partitioning.partitionCount));
 
             Map<PlanFragmentId, Optional<int[]>> bucketToPartitionMap = createBucketToPartitionMap(
@@ -882,7 +879,7 @@ public class PipelinedQueryScheduler
             for (SqlStage stage : stageManager.getDistributedStagesInTopologicalOrder()) {
                 Optional<SqlStage> parentStage = stageManager.getParent(stage.getStageId());
                 TaskLifecycleListener taskLifecycleListener;
-                if (parentStage.isEmpty() || parentStage.get().getFragment().getPartitioning().isCoordinatorOnly()) {
+                if (parentStage.isEmpty() || parentStage.get().getFragment().isCoordinatorOnly()) {
                     // output will be consumed by coordinator
                     taskLifecycleListener = coordinatorTaskLifecycleListener;
                 }
@@ -966,7 +963,7 @@ public class PipelinedQueryScheduler
                 List<RemoteSourceNode> remoteSourceNodes,
                 Optional<Integer> partitionCount)
         {
-            if (partitioningHandle.equals(SOURCE_DISTRIBUTION) || partitioningHandle.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
+            if (partitioningHandle.equals(SOURCE_DISTRIBUTION)) {
                 return Optional.of(new int[1]);
             }
             if (searchFrom(fragmentRoot).where(node -> node instanceof TableScanNode).findFirst().isPresent()) {
@@ -992,15 +989,17 @@ public class PipelinedQueryScheduler
             ImmutableMap.Builder<PlanFragmentId, PipelinedOutputBufferManager> result = ImmutableMap.builder();
             result.putAll(outputBuffersForStagesConsumedByCoordinator);
             for (SqlStage parentStage : stageManager.getDistributedStagesInTopologicalOrder()) {
+                PlanFragment parentFragment = parentStage.getFragment();
                 for (SqlStage childStage : stageManager.getChildren(parentStage.getStageId())) {
-                    PlanFragmentId fragmentId = childStage.getFragment().getId();
-                    PartitioningHandle partitioningHandle = childStage.getFragment().getOutputPartitioningScheme().getPartitioning().getHandle();
+                    PlanFragment childFragment = childStage.getFragment();
+                    PlanFragmentId fragmentId = childFragment.getId();
+                    PartitioningHandle partitioningHandle = childFragment.getOutputPartitioningScheme().getPartitioning().getHandle();
 
                     PipelinedOutputBufferManager outputBufferManager;
-                    if (partitioningHandle.equals(FIXED_BROADCAST_DISTRIBUTION)) {
+                    if (partitioningHandle.equals(SINGLE_DISTRIBUTION) && getRemoteSource(parentFragment, childFragment).getExchangeType() == REPLICATE) {
                         outputBufferManager = new BroadcastPipelinedOutputBufferManager();
                     }
-                    else if (partitioningHandle.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
+                    else if (partitioningHandle.equals(FIXED_ARBITRARY_DISTRIBUTION) && parentFragment.isScaleWriters()) {
                         outputBufferManager = new ScaledPipelinedOutputBufferManager();
                     }
                     else {
@@ -1013,6 +1012,16 @@ public class PipelinedQueryScheduler
                 }
             }
             return result.buildOrThrow();
+        }
+
+        private static RemoteSourceNode getRemoteSource(PlanFragment parentFragment, PlanFragment childFragment)
+        {
+            for (RemoteSourceNode remoteSource : parentFragment.getRemoteSourceNodes()) {
+                if (remoteSource.getSourceFragmentIds().contains(childFragment.getId())) {
+                    return remoteSource;
+                }
+            }
+            throw new IllegalArgumentException("Remote source for fragment %s not found in fragment %s".formatted(childFragment.getId(), parentFragment.getId()));
         }
 
         private static StageScheduler createStageScheduler(
@@ -1094,7 +1103,7 @@ public class PipelinedQueryScheduler
                         () -> childStageExecutions.stream().anyMatch(StageExecution::isAnyTaskBlocked));
             }
 
-            if (partitioningHandle.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
+            if (fragment.getPartitioning().equals(FIXED_ARBITRARY_DISTRIBUTION) && fragment.isScaleWriters()) {
                 Supplier<Collection<TaskStatus>> sourceTasksProvider = () -> childStageExecutions.stream()
                         .map(StageExecution::getTaskStatuses)
                         .flatMap(List::stream)
@@ -1115,6 +1124,10 @@ public class PipelinedQueryScheduler
                         .addListener(scheduler::finish, directExecutor());
 
                 return scheduler;
+            }
+
+            if (fragment.isCoordinatorOnly()) {
+                return new FixedCountScheduler(stageExecution, ImmutableList.of(nodeScheduler.createNodeSelector(session, Optional.empty()).selectCurrentNode()));
             }
 
             if (splitSources.isEmpty()) {

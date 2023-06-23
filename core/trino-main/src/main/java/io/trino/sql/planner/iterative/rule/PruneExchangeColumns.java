@@ -104,7 +104,6 @@ public class PruneExchangeColumns
                 exchangeNode.getPartitioningScheme().getPartitioning(),
                 newOutputs.build(),
                 exchangeNode.getPartitioningScheme().getHashColumn(),
-                exchangeNode.getPartitioningScheme().isReplicateNullsAndAny(),
                 exchangeNode.getPartitioningScheme().getBucketToPartition(),
                 exchangeNode.getPartitioningScheme().getPartitionCount());
 
@@ -115,6 +114,7 @@ public class PruneExchangeColumns
                 newPartitioningScheme,
                 exchangeNode.getSources(),
                 newInputs,
-                exchangeNode.getOrderingScheme()));
+                exchangeNode.getOrderingScheme(),
+                exchangeNode.isScaleWriters()));
     }
 }

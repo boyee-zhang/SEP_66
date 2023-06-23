@@ -496,9 +496,16 @@ public class PlanPrinter
             Anonymizer anonymizer)
     {
         StringBuilder builder = new StringBuilder();
-        builder.append(format("Fragment %s [%s]\n",
+        builder.append(format("Fragment %s [%s",
                 fragment.getId(),
                 anonymizer.anonymize(fragment.getPartitioning())));
+        if (fragment.isCoordinatorOnly()) {
+            builder.append(", COORDINATOR");
+        }
+        if (fragment.isScaleWriters()) {
+            builder.append(", SCALED");
+        }
+        builder.append("]\n");
 
         if (stageInfo.isPresent()) {
             StageStats stageStats = stageInfo.get().getStageStats();
@@ -564,7 +571,7 @@ public class PlanPrinter
                 .append(format("Output layout: [%s]\n",
                         Joiner.on(", ").join(layout)));
 
-        boolean replicateNullsAndAny = partitioningScheme.isReplicateNullsAndAny();
+        boolean replicateNullsAndAny = partitioningScheme.getPartitioning().isNullsAndAnyReplicated();
         List<String> arguments = partitioningScheme.getPartitioning().getArguments().stream()
                 .map(argument -> {
                     if (argument.isConstant()) {
@@ -640,6 +647,8 @@ public class PlanPrinter
                 types.allTypes(),
                 SINGLE_DISTRIBUTION,
                 Optional.empty(),
+                false,
+                false,
                 ImmutableList.of(plan.getId()),
                 new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), plan.getOutputSymbols()),
                 StatsAndCosts.empty(),
@@ -1492,7 +1501,9 @@ public class PlanPrinter
         {
             addNode(node,
                     format("Remote%s", node.getOrderingScheme().isPresent() ? "Merge" : "Source"),
-                    ImmutableMap.of("sourceFragmentIds", formatCollection(node.getSourceFragmentIds(), Objects::toString)),
+                    ImmutableMap.of(
+                            "type", node.getExchangeType().toString(),
+                            "sourceFragmentIds", formatCollection(node.getSourceFragmentIds(), Objects::toString)),
                     ImmutableList.of(),
                     ImmutableList.of(),
                     node.getSourceFragmentIds(),
@@ -1667,9 +1678,10 @@ public class PlanPrinter
                         "LocalExchange",
                         ImmutableMap.of(
                                 "partitioning", anonymizer.anonymize(node.getPartitioningScheme().getPartitioning().getHandle()),
-                                "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().isReplicateNullsAndAny()),
+                                "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().getPartitioning().isNullsAndAnyReplicated()),
                                 "hashColumn", formatHash(node.getPartitioningScheme().getHashColumn()),
-                                "arguments", formatCollection(node.getPartitioningScheme().getPartitioning().getArguments(), anonymizer::anonymize)),
+                                "arguments", formatCollection(node.getPartitioningScheme().getPartitioning().getArguments(), anonymizer::anonymize),
+                                "scaled", formatBoolean(node.isScaleWriters())),
                         context.tag());
             }
             else {
@@ -1678,8 +1690,9 @@ public class PlanPrinter
                         ImmutableMap.of(
                                 "partitionCount", node.getPartitioningScheme().getPartitionCount().map(String::valueOf).orElse(""),
                                 "type", node.getType().name(),
-                                "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().isReplicateNullsAndAny()),
-                                "hashColumn", formatHash(node.getPartitioningScheme().getHashColumn())),
+                                "isReplicateNullsAndAny", formatBoolean(node.getPartitioningScheme().getPartitioning().isNullsAndAnyReplicated()),
+                                "hashColumn", formatHash(node.getPartitioningScheme().getHashColumn()),
+                                "scaled", formatBoolean(node.isScaleWriters())),
                         context.tag());
             }
             return processChildren(node, new Context());

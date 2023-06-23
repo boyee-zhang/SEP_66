@@ -1,5 +1,5 @@
 remote exchange (GATHER, SINGLE, [])
-    local exchange (GATHER, UNKNOWN, [])
+    local exchange (GATHER, SINGLE, [])
         remote exchange (REPARTITION, ROUND_ROBIN, [])
             final aggregation over (expr$gid, name_19)
                 local exchange (GATHER, SINGLE, [])
@@ -30,5 +30,5 @@ remote exchange (GATHER, SINGLE, [])
                                         remote exchange (REPARTITION, HASH, ["orderkey_14"])
                                             scan orders
                                 local exchange (GATHER, SINGLE, [])
-                                    remote exchange (REPLICATE, BROADCAST, [])
+                                    remote exchange (REPLICATE, SINGLE, [])
                                         scan nation

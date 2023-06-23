@@ -72,9 +72,6 @@ import static io.trino.SystemSessionProperties.isForceSingleNodeOutput;
 import static io.trino.spi.StandardErrorCode.QUERY_HAS_TOO_MANY_STAGES;
 import static io.trino.spi.connector.StandardWarningCode.TOO_MANY_STAGES;
 import static io.trino.sql.planner.SchedulingOrderVisitor.scheduleOrder;
-import static io.trino.sql.planner.SystemPartitioningHandle.COORDINATOR_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_HASH_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SOURCE_DISTRIBUTION;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.REMOTE;
@@ -184,12 +181,13 @@ public class PlanFragmenter
                 fragment.getSymbols(),
                 fragment.getPartitioning(),
                 fragment.getPartitionCount(),
+                fragment.isCoordinatorOnly(),
+                fragment.isScaleWriters(),
                 fragment.getPartitionedSources(),
                 new PartitioningScheme(
                         newOutputPartitioning,
                         outputPartitioningScheme.getOutputLayout(),
                         outputPartitioningScheme.getHashColumn(),
-                        outputPartitioningScheme.isReplicateNullsAndAny(),
                         outputPartitioningScheme.getBucketToPartition(),
                         outputPartitioningScheme.getPartitionCount()),
                 fragment.getStatsAndCosts(),
@@ -252,6 +250,8 @@ public class PlanFragmenter
                     symbols,
                     properties.getPartitioningHandle(),
                     properties.getPartitionCount(),
+                    properties.isCoordinatorOnly(),
+                    properties.isScaleWriters(),
                     schedulingOrder,
                     properties.getPartitioningScheme(),
                     statsAndCosts.getForSubplan(root),
@@ -406,6 +406,8 @@ public class PlanFragmenter
                         session);
             }
 
+            context.get().setScaleWriters(exchange.isScaleWriters());
+
             ImmutableList.Builder<FragmentProperties> childrenProperties = ImmutableList.builder();
             ImmutableList.Builder<SubPlan> childrenBuilder = ImmutableList.builder();
             for (int sourceIndex = 0; sourceIndex < exchange.getSources().size(); sourceIndex++) {
@@ -440,16 +442,16 @@ public class PlanFragmenter
 
         private static boolean isWorkerCoordinatorBoundary(FragmentProperties fragmentProperties, List<FragmentProperties> childFragmentsProperties)
         {
-            if (!fragmentProperties.getPartitioningHandle().isCoordinatorOnly()) {
+            if (!fragmentProperties.isCoordinatorOnly()) {
                 // receiver stage is not a coordinator stage
                 return false;
             }
-            if (childFragmentsProperties.stream().allMatch(properties -> properties.getPartitioningHandle().isCoordinatorOnly())) {
+            if (childFragmentsProperties.stream().allMatch(FragmentProperties::isCoordinatorOnly)) {
                 // coordinator to coordinator exchange
                 return false;
             }
             checkArgument(
-                    childFragmentsProperties.stream().noneMatch(properties -> properties.getPartitioningHandle().isCoordinatorOnly()),
+                    childFragmentsProperties.stream().noneMatch(FragmentProperties::isCoordinatorOnly),
                     "Plans are not expected to have a mix of coordinator only fragments and distributed fragments as siblings");
             return true;
         }
@@ -463,6 +465,8 @@ public class PlanFragmenter
 
         private Optional<PartitioningHandle> partitioningHandle = Optional.empty();
         private Optional<Integer> partitionCount = Optional.empty();
+        private boolean coordinatorOnly;
+        private boolean scaleWriters;
         private final Set<PlanNodeId> partitionedSources = new HashSet<>();
 
         public FragmentProperties(PartitioningScheme partitioningScheme)
@@ -524,12 +528,6 @@ public class PlanFragmenter
                 return this;
             }
 
-            if (isCompatibleScaledWriterPartitioning(currentPartitioning, distribution)) {
-                this.partitioningHandle = Optional.of(distribution);
-                this.partitionCount = partitionCount;
-                return this;
-            }
-
             if (currentPartitioning.equals(SOURCE_DISTRIBUTION)) {
                 this.partitioningHandle = Optional.of(distribution);
                 return this;
@@ -559,34 +557,27 @@ public class PlanFragmenter
             return false;
         }
 
-        private static boolean isCompatibleScaledWriterPartitioning(PartitioningHandle current, PartitioningHandle suggested)
-        {
-            if (current.equals(FIXED_HASH_DISTRIBUTION) && suggested.equals(SCALED_WRITER_HASH_DISTRIBUTION)) {
-                return true;
-            }
-            PartitioningHandle currentWithScaledWritersEnabled = new PartitioningHandle(
-                    current.getCatalogHandle(),
-                    current.getTransactionHandle(),
-                    current.getConnectorHandle(),
-                    true);
-            return currentWithScaledWritersEnabled.equals(suggested);
-        }
-
         public FragmentProperties setCoordinatorOnlyDistribution()
         {
-            if (partitioningHandle.isPresent() && partitioningHandle.get().isCoordinatorOnly()) {
+            if (coordinatorOnly) {
                 // already single node distribution
                 return this;
             }
 
             // only system SINGLE can be upgraded to COORDINATOR_ONLY
             checkState(partitioningHandle.isEmpty() || partitioningHandle.get().equals(SINGLE_DISTRIBUTION),
-                    "Cannot overwrite partitioning with %s (currently set to %s)",
-                    COORDINATOR_DISTRIBUTION,
+                    "Cannot set coordinator only distribution (partitioning set to %s)",
                     partitioningHandle);
 
-            partitioningHandle = Optional.of(COORDINATOR_DISTRIBUTION);
+            partitioningHandle = Optional.of(SINGLE_DISTRIBUTION);
+            coordinatorOnly = true;
 
+            return this;
+        }
+
+        public FragmentProperties setScaleWriters(boolean scaleWriters)
+        {
+            this.scaleWriters = scaleWriters;
             return this;
         }
 
@@ -605,7 +596,7 @@ public class PlanFragmenter
             PartitioningHandle currentPartitioning = partitioningHandle.get();
 
             // If already system SINGLE or COORDINATOR_ONLY, leave it as is (this is for single-node execution)
-            if (currentPartitioning.equals(SINGLE_DISTRIBUTION) || currentPartitioning.equals(COORDINATOR_DISTRIBUTION)) {
+            if (currentPartitioning.equals(SINGLE_DISTRIBUTION)) {
                 return this;
             }
 
@@ -647,6 +638,16 @@ public class PlanFragmenter
         public Set<PlanNodeId> getPartitionedSources()
         {
             return partitionedSources;
+        }
+
+        public boolean isCoordinatorOnly()
+        {
+            return coordinatorOnly;
+        }
+
+        public boolean isScaleWriters()
+        {
+            return scaleWriters;
         }
     }
 

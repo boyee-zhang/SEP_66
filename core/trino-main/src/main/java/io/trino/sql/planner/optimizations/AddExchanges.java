@@ -36,15 +36,14 @@ import io.trino.spi.connector.LocalProperty;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.Partitioning;
-import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
-import io.trino.sql.planner.SystemPartitioningHandle;
 import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.iterative.rule.PushPredicateIntoTableScan;
+import io.trino.sql.planner.optimizations.PreferredProperties.PartitioningProperties;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
@@ -118,11 +117,7 @@ import static io.trino.SystemSessionProperties.isUseExactPartitioning;
 import static io.trino.SystemSessionProperties.isUsePartialDistinctLimit;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
-import static io.trino.sql.planner.optimizations.ActualProperties.Global.partitionedOn;
-import static io.trino.sql.planner.optimizations.ActualProperties.Global.singlePartition;
 import static io.trino.sql.planner.optimizations.LocalProperties.grouped;
 import static io.trino.sql.planner.optimizations.PreferredProperties.partitionedWithLocal;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.REMOTE;
@@ -181,7 +176,7 @@ public class AddExchanges
         private final Session session;
         private final DomainTranslator domainTranslator;
         private final boolean redistributeWrites;
-        private final boolean scaleWriters;
+        private final boolean scaleWritersEnabled;
 
         public Rewriter(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session, TableStatsProvider tableStatsProvider)
         {
@@ -192,7 +187,7 @@ public class AddExchanges
             this.session = session;
             this.domainTranslator = new DomainTranslator(plannerContext);
             this.redistributeWrites = SystemSessionProperties.isRedistributeWrites(session);
-            this.scaleWriters = SystemSessionProperties.isScaleWriters(session);
+            this.scaleWritersEnabled = SystemSessionProperties.isScaleWriters(session);
         }
 
         @Override
@@ -267,8 +262,7 @@ public class AddExchanges
                         child.getProperties());
             }
             else if (!isNodePartitionedOn(child.getProperties(), partitioningRequirement) || node.hasEmptyGroupingSet()) {
-                List<Symbol> partitioningKeys = parentPreferredProperties.getGlobalProperties()
-                        .flatMap(PreferredProperties.Global::getPartitioningProperties)
+                List<Symbol> partitioningKeys = parentPreferredProperties.getNodePartitioning()
                         .map(PreferredProperties.PartitioningProperties::getPartitioningColumns)
                         .flatMap(partitioningColumns -> useParentPreferredPartitioning(node, partitioningColumns))
                         .orElse(node.getGroupingKeys());
@@ -732,11 +726,7 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitSimpleTableExecuteNode(SimpleTableExecuteNode node, PreferredProperties context)
         {
-            return new PlanWithProperties(
-                    node,
-                    ActualProperties.builder()
-                            .global(singlePartition())
-                            .build());
+            return new PlanWithProperties(node, deriveProperties(node, ImmutableList.of()));
         }
 
         private PlanWithProperties visitTableWriter(PlanNode node, Optional<PartitioningScheme> partitioningScheme, PlanNode source, PreferredProperties preferredProperties, TableWriterNode.WriterTarget writerTarget)
@@ -760,48 +750,31 @@ public class AddExchanges
 
         private PlanWithProperties getWriterPlanWithProperties(Optional<PartitioningScheme> partitioningScheme, PlanWithProperties newSource, TableWriterNode.WriterTarget writerTarget)
         {
-            if (partitioningScheme.isEmpty()) {
+            boolean scaleWriters = scaleWritersEnabled
+                    && writerTarget.supportsReportingWrittenBytes(plannerContext.getMetadata(), session)
+                    && (partitioningScheme.isEmpty() || writerTarget.supportsMultipleWritersPerPartition(plannerContext.getMetadata(), session));
+
+            if (partitioningScheme.isEmpty() && (redistributeWrites || scaleWriters)) {
                 // use maxWritersTasks to set PartitioningScheme.partitionCount field to limit number of tasks that will take part in executing writing stage
                 int maxWriterTasks = writerTarget.getMaxWriterTasks(plannerContext.getMetadata(), session).orElse(getMaxWriterTaskCount(session));
                 Optional<Integer> maxWritersNodesCount = getRetryPolicy(session) != RetryPolicy.TASK
                         ? Optional.of(Math.min(maxWriterTasks, getMaxWriterTaskCount(session)))
                         : Optional.empty();
-                if (scaleWriters && writerTarget.supportsReportingWrittenBytes(plannerContext.getMetadata(), session)) {
-                    partitioningScheme = Optional.of(new PartitioningScheme(Partitioning.create(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION, ImmutableList.of()), newSource.getNode().getOutputSymbols(), Optional.empty(), false, Optional.empty(), maxWritersNodesCount));
-                }
-                else if (redistributeWrites) {
-                    partitioningScheme = Optional.of(new PartitioningScheme(Partitioning.create(FIXED_ARBITRARY_DISTRIBUTION, ImmutableList.of()), newSource.getNode().getOutputSymbols(), Optional.empty(), false, Optional.empty(), maxWritersNodesCount));
-                }
+                partitioningScheme = Optional.of(new PartitioningScheme(
+                        Partitioning.create(FIXED_ARBITRARY_DISTRIBUTION, ImmutableList.of()),
+                        newSource.getNode().getOutputSymbols(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        maxWritersNodesCount));
             }
-            else if (scaleWriters
-                    && writerTarget.supportsReportingWrittenBytes(plannerContext.getMetadata(), session)
-                    && writerTarget.supportsMultipleWritersPerPartition(plannerContext.getMetadata(), session)
-                    // do not insert an exchange if partitioning is compatible
-                    && !newSource.getProperties().isCompatibleTablePartitioningWith(partitioningScheme.get().getPartitioning(), false, plannerContext.getMetadata(), session)) {
-                if (partitioningScheme.get().getPartitioning().getHandle().equals(FIXED_HASH_DISTRIBUTION)) {
-                    partitioningScheme = Optional.of(partitioningScheme.get().withPartitioningHandle(SCALED_WRITER_HASH_DISTRIBUTION));
-                }
-                else {
-                    PartitioningHandle partitioningHandle = partitioningScheme.get().getPartitioning().getHandle();
-                    verify(!(partitioningHandle.getConnectorHandle() instanceof SystemPartitioningHandle));
-                    verify(
-                            partitioningScheme.get().getPartitioning().getArguments().stream().noneMatch(Partitioning.ArgumentBinding::isConstant),
-                            "Table writer partitioning has constant arguments");
-                    partitioningScheme = Optional.of(partitioningScheme.get().withPartitioningHandle(
-                            new PartitioningHandle(
-                                    partitioningHandle.getCatalogHandle(),
-                                    partitioningHandle.getTransactionHandle(),
-                                    partitioningHandle.getConnectorHandle(),
-                                    true)));
-                }
-            }
-            if (partitioningScheme.isPresent() && !newSource.getProperties().isCompatibleTablePartitioningWith(partitioningScheme.get().getPartitioning(), false, plannerContext.getMetadata(), session)) {
+            if (partitioningScheme.isPresent() && !newSource.getProperties().isCompatibleTablePartitioningWith(partitioningScheme.get().getPartitioning(), plannerContext.getMetadata(), session)) {
                 newSource = withDerivedProperties(
                         partitionedExchange(
                                 idAllocator.getNextId(),
                                 REMOTE,
                                 newSource.getNode(),
-                                partitioningScheme.get()),
+                                partitioningScheme.get(),
+                                scaleWriters),
                         newSource.getProperties());
             }
             return newSource;
@@ -810,21 +783,13 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitValues(ValuesNode node, PreferredProperties preferredProperties)
         {
-            return new PlanWithProperties(
-                    node,
-                    ActualProperties.builder()
-                            .global(singlePartition())
-                            .build());
+            return new PlanWithProperties(node, deriveProperties(node, ImmutableList.of()));
         }
 
         @Override
         public PlanWithProperties visitTableDelete(TableDeleteNode node, PreferredProperties context)
         {
-            return new PlanWithProperties(
-                    node,
-                    ActualProperties.builder()
-                            .global(singlePartition())
-                            .build());
+            return new PlanWithProperties(node, deriveProperties(node, ImmutableList.of()));
         }
 
         @Override
@@ -1086,15 +1051,14 @@ public class AddExchanges
                 source = node.getSource().accept(this, PreferredProperties.partitioned(ImmutableSet.copyOf(sourceSymbols)));
 
                 if (isNodePartitionedOn(source.getProperties(), sourceSymbols) && !source.getProperties().isSingleNode()) {
-                    Partitioning filteringPartitioning = source.getProperties().translate(createTranslator(sourceToFiltering)).getNodePartitioning().get();
-                    filteringSource = node.getFilteringSource().accept(this, PreferredProperties.partitionedWithNullsAndAnyReplicated(filteringPartitioning));
-                    if (!source.getProperties().withReplicatedNulls(true).isCompatibleTablePartitioningWith(filteringSource.getProperties(), sourceToFiltering::get, plannerContext.getMetadata(), session)) {
+                    Partitioning filteringPartitioning = source.getProperties().translate(createTranslator(sourceToFiltering)).getNodePartitioning().get().withNullsAndAnyReplicated();
+                    filteringSource = node.getFilteringSource().accept(this, PreferredProperties.partitioned(filteringPartitioning));
+                    if (!source.getProperties().withNullsAndAnyReplicated().isCompatibleTablePartitioningWith(filteringSource.getProperties(), sourceToFiltering::get, plannerContext.getMetadata(), session)) {
                         filteringSource = withDerivedProperties(
                                 partitionedExchange(idAllocator.getNextId(), REMOTE, filteringSource.getNode(), new PartitioningScheme(
                                         filteringPartitioning,
                                         filteringSource.getNode().getOutputSymbols(),
                                         Optional.empty(),
-                                        true,
                                         Optional.empty(),
                                         Optional.empty())),
                                 filteringSource.getProperties());
@@ -1119,17 +1083,16 @@ public class AddExchanges
                     }
                 }
 
-                verify(source.getProperties().withReplicatedNulls(true).isCompatibleTablePartitioningWith(filteringSource.getProperties(), sourceToFiltering::get, plannerContext.getMetadata(), session));
+                verify(source.getProperties().withNullsAndAnyReplicated().isCompatibleTablePartitioningWith(filteringSource.getProperties(), sourceToFiltering::get, plannerContext.getMetadata(), session));
 
                 // if colocated joins are disabled, force redistribute when using a custom partitioning
                 if (!isColocatedJoinEnabled(session) && hasMultipleSources(source.getNode(), filteringSource.getNode())) {
-                    Partitioning filteringPartitioning = source.getProperties().translate(createTranslator(sourceToFiltering)).getNodePartitioning().get();
+                    Partitioning filteringPartitioning = source.getProperties().translate(createTranslator(sourceToFiltering)).getNodePartitioning().get().withNullsAndAnyReplicated();
                     filteringSource = withDerivedProperties(
                             partitionedExchange(idAllocator.getNextId(), REMOTE, filteringSource.getNode(), new PartitioningScheme(
                                     filteringPartitioning,
                                     filteringSource.getNode().getOutputSymbols(),
                                     Optional.empty(),
-                                    true,
                                     Optional.empty(),
                                     Optional.empty())),
                             filteringSource.getProperties());
@@ -1188,11 +1151,7 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitIndexSource(IndexSourceNode node, PreferredProperties preferredProperties)
         {
-            return new PlanWithProperties(
-                    node,
-                    ActualProperties.builder()
-                            .global(singlePartition())
-                            .build());
+            return new PlanWithProperties(node, deriveProperties(node, ImmutableList.of()));
         }
 
         private Function<Symbol, Optional<Symbol>> outputToInputTranslator(UnionNode node, int sourceIndex)
@@ -1200,19 +1159,19 @@ public class AddExchanges
             return symbol -> Optional.of(node.getSymbolMapping().get(symbol).get(sourceIndex));
         }
 
-        private Partitioning selectUnionPartitioning(UnionNode node, PreferredProperties.PartitioningProperties parentPreference)
+        private Partitioning selectUnionPartitioning(UnionNode node, PartitioningProperties parentPreference)
         {
             // Use the parent's requested partitioning if available
-            if (parentPreference.getPartitioning().isPresent()) {
-                return parentPreference.getPartitioning().get();
+            if (parentPreference.getHandle().isPresent()) {
+                return new Partitioning(parentPreference.getHandle().get(), parentPreference.getArguments(), parentPreference.isNullsAndAnyReplicated());
             }
 
             // Try planning the children to see if any of them naturally produce a partitioning (for now, just select the first)
             boolean nullsAndAnyReplicated = parentPreference.isNullsAndAnyReplicated();
             for (int sourceIndex = 0; sourceIndex < node.getSources().size(); sourceIndex++) {
-                PreferredProperties.PartitioningProperties childPartitioning = parentPreference.translate(outputToInputTranslator(node, sourceIndex)).get();
+                PartitioningProperties childPartitioning = parentPreference.translate(outputToInputTranslator(node, sourceIndex)).get();
                 PreferredProperties childPreferred = PreferredProperties.builder()
-                        .global(PreferredProperties.Global.distributed(childPartitioning.withNullsAndAnyReplicated(nullsAndAnyReplicated)))
+                        .nodePartitioning(childPartitioning)
                         .build();
                 PlanWithProperties child = node.getSources().get(sourceIndex).accept(this, childPreferred);
                 // Don't select a single node partitioning so that we maintain query parallelism
@@ -1231,11 +1190,9 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitUnion(UnionNode node, PreferredProperties parentPreference)
         {
-            Optional<PreferredProperties.Global> parentGlobal = parentPreference.getGlobalProperties();
-            if (parentGlobal.isPresent() && parentGlobal.get().isDistributed() && parentGlobal.get().getPartitioningProperties().isPresent()) {
-                PreferredProperties.PartitioningProperties parentPartitioningPreference = parentGlobal.get().getPartitioningProperties().get();
-                boolean nullsAndAnyReplicated = parentPartitioningPreference.isNullsAndAnyReplicated();
-                Partitioning desiredParentPartitioning = selectUnionPartitioning(node, parentPartitioningPreference);
+            Optional<PartitioningProperties> parentPreferredNodePartitioning = parentPreference.getNodePartitioning();
+            if (parentPreferredNodePartitioning.isPresent() && parentPreferredNodePartitioning.get().isDistributed()) {
+                Partitioning desiredParentPartitioning = selectUnionPartitioning(node, parentPreferredNodePartitioning.get());
 
                 ImmutableList.Builder<PlanNode> partitionedSources = ImmutableList.builder();
                 ImmutableListMultimap.Builder<Symbol, Symbol> outputToSourcesMapping = ImmutableListMultimap.builder();
@@ -1244,12 +1201,11 @@ public class AddExchanges
                     Partitioning childPartitioning = desiredParentPartitioning.translate(createDirectTranslator(createMapping(node.getOutputSymbols(), node.sourceOutputLayout(sourceIndex))));
 
                     PreferredProperties childPreferred = PreferredProperties.builder()
-                            .global(PreferredProperties.Global.distributed(PreferredProperties.PartitioningProperties.partitioned(childPartitioning)
-                                    .withNullsAndAnyReplicated(nullsAndAnyReplicated)))
+                            .nodePartitioning(PartitioningProperties.partitioned(childPartitioning))
                             .build();
 
                     PlanWithProperties source = node.getSources().get(sourceIndex).accept(this, childPreferred);
-                    if (!source.getProperties().isCompatibleTablePartitioningWith(childPartitioning, nullsAndAnyReplicated, plannerContext.getMetadata(), session)) {
+                    if (!source.getProperties().isCompatibleTablePartitioningWith(childPartitioning, plannerContext.getMetadata(), session)) {
                         source = withDerivedProperties(
                                 partitionedExchange(
                                         idAllocator.getNextId(),
@@ -1259,7 +1215,6 @@ public class AddExchanges
                                                 childPartitioning,
                                                 source.getNode().getOutputSymbols(),
                                                 Optional.empty(),
-                                                nullsAndAnyReplicated,
                                                 Optional.empty(),
                                                 Optional.empty())),
                                 source.getProperties());
@@ -1279,9 +1234,8 @@ public class AddExchanges
                 return new PlanWithProperties(
                         newNode,
                         ActualProperties.builder()
-                                .global(partitionedOn(desiredParentPartitioning))
-                                .build()
-                                .withReplicatedNulls(parentPartitioningPreference.isNullsAndAnyReplicated()));
+                                .nodePartitioning(desiredParentPartitioning)
+                                .build());
             }
 
             // first, classify children into partitioned and unpartitioned
@@ -1309,7 +1263,7 @@ public class AddExchanges
                 // parent does not have preference or prefers some partitioning without any explicit partitioning - just use
                 // children partitioning and don't GATHER partitioned inputs
                 // TODO: add FIXED_ARBITRARY_DISTRIBUTION support on non empty unpartitionedChildren
-                if (parentGlobal.isEmpty() || parentGlobal.get().isDistributed()) {
+                if (parentPreferredNodePartitioning.isEmpty() || parentPreferredNodePartitioning.get().isDistributed()) {
                     return arbitraryDistributeUnion(node, partitionedChildren, partitionedOutputLayouts);
                 }
 
@@ -1321,7 +1275,8 @@ public class AddExchanges
                         new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), node.getOutputSymbols()),
                         partitionedChildren,
                         partitionedOutputLayouts,
-                        Optional.empty());
+                        Optional.empty(),
+                        false);
             }
             else if (!unpartitionedChildren.isEmpty()) {
                 if (!partitionedChildren.isEmpty()) {
@@ -1339,7 +1294,8 @@ public class AddExchanges
                             new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), exchangeOutputLayout),
                             partitionedChildren,
                             partitionedOutputLayouts,
-                            Optional.empty());
+                            Optional.empty(),
+                            false);
 
                     unpartitionedChildren.add(result);
                     unpartitionedOutputLayouts.add(result.getOutputSymbols());
@@ -1362,7 +1318,7 @@ public class AddExchanges
             return new PlanWithProperties(
                     result,
                     ActualProperties.builder()
-                            .global(singlePartition())
+                            .nodePartitioning(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()))
                             .build());
         }
 
@@ -1376,7 +1332,7 @@ public class AddExchanges
                 // No source distributed child, we can use insert LOCAL exchange
                 // TODO: if all children have the same partitioning, pass this partitioning to the parent
                 // instead of "arbitraryPartition".
-                return new PlanWithProperties(unionNode.replaceChildren(partitionedChildren));
+                return new PlanWithProperties(unionNode.replaceChildren(partitionedChildren), ActualProperties.builder().build());
             }
 
             int repartitionedRemoteExchangeNodesCount = partitionedChildren.stream().mapToInt(AddExchanges::countRepartitionedRemoteExchangeNodes).sum();
@@ -1388,7 +1344,7 @@ public class AddExchanges
             if (repartitionedRemoteExchangeNodesCount == 0
                     && partitionedConnectorSourceCount == 0
                     && uniqueSourceCatalogCount == 1) {
-                return new PlanWithProperties(unionNode.replaceChildren(partitionedChildren));
+                return new PlanWithProperties(unionNode.replaceChildren(partitionedChildren), ActualProperties.builder().build());
             }
             // If there is at least one not source distributed source or one of sources is connector partitioned
             // we have to insert REMOTE exchange with FIXED_ARBITRARY_DISTRIBUTION instead of local exchange
@@ -1400,7 +1356,9 @@ public class AddExchanges
                             new PartitioningScheme(Partitioning.create(FIXED_ARBITRARY_DISTRIBUTION, ImmutableList.of()), unionNode.getOutputSymbols()),
                             partitionedChildren,
                             partitionedOutputLayouts,
-                            Optional.empty()));
+                            Optional.empty(),
+                            false),
+                    ActualProperties.builder().build());
         }
 
         @Override
@@ -1558,11 +1516,6 @@ public class AddExchanges
     {
         private final PlanNode node;
         private final ActualProperties properties;
-
-        public PlanWithProperties(PlanNode node)
-        {
-            this(node, ActualProperties.builder().build());
-        }
 
         public PlanWithProperties(PlanNode node, ActualProperties properties)
         {

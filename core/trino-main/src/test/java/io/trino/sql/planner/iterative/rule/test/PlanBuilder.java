@@ -864,6 +864,7 @@ public class PlanBuilder
         private OrderingScheme orderingScheme;
         private List<PlanNode> sources = new ArrayList<>();
         private List<List<Symbol>> inputs = new ArrayList<>();
+        private boolean scaleWriters;
 
         public ExchangeBuilder type(ExchangeNode.Type type)
         {
@@ -911,7 +912,6 @@ public class PlanBuilder
                     ImmutableList.copyOf(partitioningSymbols)),
                     ImmutableList.copyOf(outputSymbols),
                     Optional.empty(),
-                    false,
                     Optional.empty(),
                     Optional.of(partitionCount)));
         }
@@ -923,7 +923,6 @@ public class PlanBuilder
                     ImmutableList.of()),
                     ImmutableList.copyOf(outputSymbols),
                     Optional.empty(),
-                    false,
                     Optional.empty(),
                     Optional.of(partitionCount)));
         }
@@ -957,9 +956,15 @@ public class PlanBuilder
             return this;
         }
 
+        public ExchangeBuilder scaleWriters(boolean scaleWriters)
+        {
+            this.scaleWriters = scaleWriters;
+            return this;
+        }
+
         protected ExchangeNode build()
         {
-            return new ExchangeNode(idAllocator.getNextId(), type, scope, partitioningScheme, sources, inputs, Optional.ofNullable(orderingScheme));
+            return new ExchangeNode(idAllocator.getNextId(), type, scope, partitioningScheme, sources, inputs, Optional.ofNullable(orderingScheme), scaleWriters);
         }
     }
 

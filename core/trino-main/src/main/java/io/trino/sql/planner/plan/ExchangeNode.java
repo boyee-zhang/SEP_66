@@ -19,10 +19,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Partitioning;
-import io.trino.sql.planner.Partitioning.ArgumentBinding;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.optimizations.PartitioningArgument;
 
 import javax.annotation.concurrent.Immutable;
 
@@ -31,9 +31,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_BROADCAST_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_PASSTHROUGH_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.REMOTE;
@@ -69,6 +67,8 @@ public class ExchangeNode
 
     private final Optional<OrderingScheme> orderingScheme;
 
+    private final boolean scaleWriters;
+
     @JsonCreator
     public ExchangeNode(
             @JsonProperty("id") PlanNodeId id,
@@ -77,7 +77,8 @@ public class ExchangeNode
             @JsonProperty("partitioningScheme") PartitioningScheme partitioningScheme,
             @JsonProperty("sources") List<PlanNode> sources,
             @JsonProperty("inputs") List<List<Symbol>> inputs,
-            @JsonProperty("orderingScheme") Optional<OrderingScheme> orderingScheme)
+            @JsonProperty("orderingScheme") Optional<OrderingScheme> orderingScheme,
+            @JsonProperty("scaleWriters") boolean scaleWriters)
     {
         super(id);
 
@@ -95,15 +96,14 @@ public class ExchangeNode
             checkArgument(ImmutableSet.copyOf(sources.get(i).getOutputSymbols()).containsAll(inputs.get(i)), "Source does not supply all required input symbols");
         }
 
-        checkArgument(scope != LOCAL || partitioningScheme.getPartitioning().getArguments().stream().allMatch(ArgumentBinding::isVariable),
+        checkArgument(scope != LOCAL || partitioningScheme.getPartitioning().getArguments().stream().allMatch(PartitioningArgument::isVariable),
                 "local exchanges do not support constant partition function arguments");
 
-        checkArgument(scope != REMOTE || type == Type.REPARTITION || !partitioningScheme.isReplicateNullsAndAny(), "Only REPARTITION can replicate remotely");
+        checkArgument(scope != REMOTE || type == Type.REPARTITION || !partitioningScheme.getPartitioning().isNullsAndAnyReplicated(), "Only REPARTITION can replicate remotely");
 
         orderingScheme.ifPresent(ordering -> {
             PartitioningHandle partitioningHandle = partitioningScheme.getPartitioning().getHandle();
             checkArgument(scope != REMOTE || partitioningHandle.equals(SINGLE_DISTRIBUTION), "remote merging exchange requires single distribution");
-            checkArgument(scope != LOCAL || partitioningHandle.equals(FIXED_PASSTHROUGH_DISTRIBUTION), "local merging exchange requires passthrough distribution");
             checkArgument(partitioningScheme.getOutputLayout().containsAll(ordering.getOrderBy()), "Partitioning scheme does not supply all required ordering symbols");
             checkArgument(type == Type.GATHER, "Merging exchange must be of GATHER type");
             checkArgument(inputs.size() == 1, "Merging exchange must have single input");
@@ -114,6 +114,7 @@ public class ExchangeNode
         this.partitioningScheme = partitioningScheme;
         this.inputs = listOfListsCopy(inputs);
         this.orderingScheme = orderingScheme;
+        this.scaleWriters = scaleWriters;
     }
 
     public static ExchangeNode partitionedExchange(PlanNodeId id, Scope scope, PlanNode child, List<Symbol> partitioningColumns, Optional<Symbol> hashColumns)
@@ -128,15 +129,19 @@ public class ExchangeNode
                 scope,
                 child,
                 new PartitioningScheme(
-                        Partitioning.create(FIXED_HASH_DISTRIBUTION, partitioningColumns),
+                        Partitioning.create(FIXED_HASH_DISTRIBUTION, partitioningColumns, replicateNullsAndAny),
                         child.getOutputSymbols(),
                         hashColumns,
-                        replicateNullsAndAny,
                         Optional.empty(),
                         Optional.empty()));
     }
 
     public static ExchangeNode partitionedExchange(PlanNodeId id, Scope scope, PlanNode child, PartitioningScheme partitioningScheme)
+    {
+        return partitionedExchange(id, scope, child, partitioningScheme, false);
+    }
+
+    public static ExchangeNode partitionedExchange(PlanNodeId id, Scope scope, PlanNode child, PartitioningScheme partitioningScheme, boolean scaleWriters)
     {
         if (partitioningScheme.getPartitioning().getHandle().isSingleNode()) {
             return gatheringExchange(id, scope, child);
@@ -148,7 +153,8 @@ public class ExchangeNode
                 partitioningScheme,
                 ImmutableList.of(child),
                 ImmutableList.of(partitioningScheme.getOutputLayout()).asList(),
-                Optional.empty());
+                Optional.empty(),
+                scaleWriters);
     }
 
     public static ExchangeNode replicatedExchange(PlanNodeId id, Scope scope, PlanNode child)
@@ -157,10 +163,11 @@ public class ExchangeNode
                 id,
                 ExchangeNode.Type.REPLICATE,
                 scope,
-                new PartitioningScheme(Partitioning.create(FIXED_BROADCAST_DISTRIBUTION, ImmutableList.of()), child.getOutputSymbols()),
+                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), child.getOutputSymbols()),
                 ImmutableList.of(child),
                 ImmutableList.of(child.getOutputSymbols()),
-                Optional.empty());
+                Optional.empty(),
+                false);
     }
 
     public static ExchangeNode gatheringExchange(PlanNodeId id, Scope scope, PlanNode child)
@@ -172,7 +179,8 @@ public class ExchangeNode
                 new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), child.getOutputSymbols()),
                 ImmutableList.of(child),
                 ImmutableList.of(child.getOutputSymbols()),
-                Optional.empty());
+                Optional.empty(),
+                false);
     }
 
     public static ExchangeNode roundRobinExchange(PlanNodeId id, Scope scope, PlanNode child)
@@ -186,15 +194,15 @@ public class ExchangeNode
 
     public static ExchangeNode mergingExchange(PlanNodeId id, Scope scope, PlanNode child, OrderingScheme orderingScheme)
     {
-        PartitioningHandle partitioningHandle = scope == LOCAL ? FIXED_PASSTHROUGH_DISTRIBUTION : SINGLE_DISTRIBUTION;
         return new ExchangeNode(
                 id,
                 Type.GATHER,
                 scope,
-                new PartitioningScheme(Partitioning.create(partitioningHandle, ImmutableList.of()), child.getOutputSymbols()),
+                new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), child.getOutputSymbols()),
                 ImmutableList.of(child),
                 ImmutableList.of(child.getOutputSymbols()),
-                Optional.of(orderingScheme));
+                Optional.of(orderingScheme),
+                false);
     }
 
     @JsonProperty
@@ -235,6 +243,12 @@ public class ExchangeNode
     }
 
     @JsonProperty
+    public boolean isScaleWriters()
+    {
+        return scaleWriters;
+    }
+
+    @JsonProperty
     public List<List<Symbol>> getInputs()
     {
         return inputs;
@@ -249,6 +263,6 @@ public class ExchangeNode
     @Override
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
-        return new ExchangeNode(getId(), type, scope, partitioningScheme, newChildren, inputs, orderingScheme);
+        return new ExchangeNode(getId(), type, scope, partitioningScheme, newChildren, inputs, orderingScheme, scaleWriters);
     }
 }
