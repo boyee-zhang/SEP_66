@@ -272,8 +272,8 @@ the following table:
   * - ``TIMESTAMP``
     - ``TIMESTAMP(3) WITH TIME ZONE``
     -
-  * - ``LIST<?>``
-    - ``VARCHAR``
+  * - ``LIST``
+    - ``ARRAY``
     -
   * - ``MAP<?, ?>``
     - ``VARCHAR``

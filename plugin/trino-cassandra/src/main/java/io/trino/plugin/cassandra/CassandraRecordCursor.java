@@ -152,6 +152,7 @@ public class CassandraRecordCursor
     {
         CassandraType cassandraType = cassandraTypes.get(i);
         switch (cassandraType.getKind()) {
+            case LIST:
             case TUPLE:
             case UDT:
                 return cassandraTypeManager.getColumnValue(cassandraType, currentRow, currentRow.firstIndexOf(validColumnName(columnNames.get(i)))).getValue();
