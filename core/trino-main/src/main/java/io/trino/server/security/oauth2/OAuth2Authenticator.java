@@ -13,6 +13,8 @@
  */
 package io.trino.server.security.oauth2;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
@@ -78,7 +80,19 @@ public class OAuth2Authenticator
         if (claims.isEmpty()) {
             return Optional.empty();
         }
-        String principal = (String) claims.get().get(principalField);
+        Object principalObj = claims.get().get(principalField);
+        String principal = null;
+        if (principalObj instanceof String) {
+            principal = (String) principalObj;
+        } else {
+            ObjectMapper mapper = new ObjectMapper();
+            try {
+                principal = mapper.writeValueAsString(principalObj);
+            }
+            catch (JsonProcessingException e) {
+                return Optional.empty();
+            }
+        }
         Identity.Builder builder = Identity.forUser(userMapping.mapUser(principal));
         builder.withPrincipal(new BasicPrincipal(principal));
         groupsField.flatMap(field -> Optional.ofNullable((List<String>) claims.get().get(field)))
