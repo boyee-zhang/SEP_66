@@ -84,11 +84,13 @@ public class KuduClientSession
     public static final String DEFAULT_SCHEMA = "default";
     private final KuduClientWrapper client;
     private final SchemaEmulation schemaEmulation;
+    private final KuduScannerConfig scannerConfig;
 
-    public KuduClientSession(KuduClientWrapper client, SchemaEmulation schemaEmulation)
+    public KuduClientSession(KuduClientWrapper client, SchemaEmulation schemaEmulation, KuduScannerConfig scannerConfig)
     {
         this.client = client;
         this.schemaEmulation = schemaEmulation;
+        this.scannerConfig = scannerConfig;
     }
 
     public List<String> listSchemaNames()
@@ -156,6 +158,9 @@ public class KuduClientSession
         KuduScanToken.KuduScanTokenBuilder builder = client.newScanTokenBuilder(table);
         // TODO: remove when kudu client bug is fixed: https://gerrit.cloudera.org/#/c/18166/
         builder.includeTabletMetadata(false);
+        builder.scanRequestTimeout(scannerConfig.getScanRequestTimeout().toMillis());
+        builder.batchSizeBytes((int) scannerConfig.getBatchSize().toBytes());
+        builder.keepAlivePeriodMs(scannerConfig.getKeepaliveInterval().toMillis());
 
         TupleDomain<ColumnHandle> constraint = tableHandle.getConstraint()
                 .intersect(dynamicFilter.getCurrentPredicate().simplify(100));
@@ -223,7 +228,9 @@ public class KuduClientSession
     public KuduScanner createScanner(KuduSplit kuduSplit)
     {
         try {
-            return client.deserializeIntoScanner(kuduSplit.getSerializedScanToken());
+            KuduScanner scanner = client.deserializeIntoScanner(kuduSplit.getSerializedScanToken());
+            KuduScannerAliveKeeper.add(scanner, scannerConfig.getKeepaliveInterval());
+            return scanner;
         }
         catch (IOException e) {
             throw new RuntimeException(e);
