@@ -41,6 +41,7 @@ import io.trino.plugin.hive.metastore.Table;
 import io.trino.plugin.hive.type.StructTypeInfo;
 import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.type.ArrayType;
@@ -171,6 +172,7 @@ import static java.math.RoundingMode.UNNECESSARY;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 import static org.apache.hadoop.hive.serde2.ColumnProjectionUtils.READ_ALL_COLUMNS;
 import static org.apache.hadoop.hive.serde2.ColumnProjectionUtils.READ_COLUMN_IDS_CONF_STR;
 
@@ -500,6 +502,35 @@ public final class HiveUtil
                 TIMESTAMP_MILLIS.equals(type) ||
                 type instanceof VarcharType ||
                 type instanceof CharType;
+    }
+
+    public static NullableValue partitionKeyFromBlock(Type type, Block block, int position)
+    {
+        if (block.isNull(position)) {
+            return NullableValue.asNull(type);
+        }
+        if (type instanceof DecimalType) {
+            DecimalType decimalType = (DecimalType) type;
+            if (decimalType.isShort()) {
+                return NullableValue.of(type, type.getLong(block, position));
+            }
+            return NullableValue.of(type, type.getObject(block, position));
+        }
+        if (BOOLEAN.equals(type)) {
+            return NullableValue.of(type, type.getBoolean(block, position));
+        }
+        if (REAL.equals(type) || DOUBLE.equals(type)) {
+            return NullableValue.of(type, type.getDouble(block, position));
+        }
+        if (TINYINT.equals(type) ||
+                SMALLINT.equals(type) ||
+                INTEGER.equals(type) ||
+                BIGINT.equals(type) ||
+                DATE.equals(type) ||
+                TIMESTAMP_MILLIS.equals(type)) {
+            return NullableValue.of(type, type.getLong(block, position));
+        }
+        return NullableValue.of(type, type.getObject(block, position));
     }
 
     public static NullableValue parsePartitionValue(String partitionName, String value, Type type)
@@ -870,6 +901,11 @@ public final class HiveUtil
             start = end + 1;
         }
         return resultBuilder.build();
+    }
+
+    public static String erasePartitionColumnNames(String partitionName)
+    {
+        return toPartitionValues(partitionName).stream().map(partition -> "=" + escapePathName(partition)).collect(joining("/"));
     }
 
     public static NullableValue getPrefilledColumnValue(
