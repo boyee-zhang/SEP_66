@@ -24,7 +24,6 @@ import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
 
-import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.instanceSize;
 
 public class AvroFileWriter
@@ -45,11 +44,10 @@ public class AvroFileWriter
             List<Type> types)
             throws IOException, AvroTypeException
     {
-        verify(compressionKind.isSupportedLocally(), "compression kind must be supported locally: %s", compressionKind);
         pagePositionDataWriter = new AvroPagePositionDataWriter(schema, avroTypeManager, names, types);
         try {
             DataFileWriter<Integer> fileWriter = new DataFileWriter<>(pagePositionDataWriter)
-                    .setCodec(compressionKind.getCodecFactory());
+                    .setCodec(compressionKind.getTrinoCodecFactory());
             fileMetadata.forEach(fileWriter::setMeta);
             pagePositionFileWriter = fileWriter.create(schema, rawOutput);
         }

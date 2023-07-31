@@ -44,6 +44,7 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarbinaryType;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
+import org.apache.avro.file.CodecFactory;
 import org.apache.avro.file.DataFileReader;
 import org.apache.avro.file.DataFileWriter;
 import org.apache.avro.generic.GenericData;
@@ -82,6 +83,10 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Double.doubleToLongBits;
 import static java.lang.Float.floatToIntBits;
+import static org.apache.avro.file.CodecFactory.DEFAULT_DEFLATE_LEVEL;
+import static org.apache.avro.file.CodecFactory.DEFAULT_ZSTANDARD_BUFFERPOOL;
+import static org.apache.avro.file.CodecFactory.DEFAULT_ZSTANDARD_LEVEL;
+import static org.apache.avro.file.CodecFactory.nullCodec;
 import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 import static org.assertj.core.api.AssertionsForClassTypes.within;
 
@@ -155,15 +160,15 @@ public abstract class TestAvroBase
 
         ALL_TYPES_GENERIC_RECORD = new GenericData.Record(ALL_TYPES_RECORD_SCHEMA);
         ALL_TYPES_GENERIC_RECORD.put("aBoolean", true);
-        allTypeBlocks.add(new ByteArrayBlock(1, Optional.empty(), new byte[]{1}));
+        allTypeBlocks.add(new ByteArrayBlock(1, Optional.empty(), new byte[] {1}));
         ALL_TYPES_GENERIC_RECORD.put("aInt", 42);
-        allTypeBlocks.add(new IntArrayBlock(1, Optional.empty(), new int[]{42}));
+        allTypeBlocks.add(new IntArrayBlock(1, Optional.empty(), new int[] {42}));
         ALL_TYPES_GENERIC_RECORD.put("aLong", 3400L);
-        allTypeBlocks.add(new LongArrayBlock(1, Optional.empty(), new long[]{3400L}));
+        allTypeBlocks.add(new LongArrayBlock(1, Optional.empty(), new long[] {3400L}));
         ALL_TYPES_GENERIC_RECORD.put("aFloat", 3.14f);
-        allTypeBlocks.add(new IntArrayBlock(1, Optional.empty(), new int[]{floatToIntBits(3.14f)}));
+        allTypeBlocks.add(new IntArrayBlock(1, Optional.empty(), new int[] {floatToIntBits(3.14f)}));
         ALL_TYPES_GENERIC_RECORD.put("aDouble", 9.81);
-        allTypeBlocks.add(new LongArrayBlock(1, Optional.empty(), new long[]{doubleToLongBits(9.81)}));
+        allTypeBlocks.add(new LongArrayBlock(1, Optional.empty(), new long[] {doubleToLongBits(9.81)}));
         ALL_TYPES_GENERIC_RECORD.put("aString", A_STRING_VALUE);
         allTypeBlocks.add(new VariableWidthBlock(1, Slices.utf8Slice(A_STRING_VALUE), new int[] {0, Slices.utf8Slice(A_STRING_VALUE).length()}, Optional.empty()));
         ALL_TYPES_GENERIC_RECORD.put("aBytes", A_BYTES_VALUE);
@@ -272,9 +277,7 @@ public abstract class TestAvroBase
             throws IOException, AvroTypeException
     {
         for (AvroCompressionKind compressionKind : AvroCompressionKind.values()) {
-            if (compressionKind.isSupportedLocally()) {
-                testSerdeCycles(schema, compressionKind);
-            }
+            testSerdeCycles(schema, compressionKind);
         }
     }
 
@@ -303,9 +306,10 @@ public abstract class TestAvroBase
             testRecordsExpected.add((GenericRecord) o);
         }
 
+        TrinoInputFile inputFile = createWrittenFileWithData(schema, testRecordsExpected.build(), temp1, getLegacyCodecFactory(compressionKind));
         ImmutableList.Builder<Page> pages = ImmutableList.builder();
         try (AvroFileReader fileReader = new AvroFileReader(
-                createWrittenFileWithData(schema, testRecordsExpected.build(), temp1),
+                inputFile,
                 schema,
                 NoOpAvroTypeManager.INSTANCE)) {
             while (fileReader.hasNext()) {
@@ -326,6 +330,7 @@ public abstract class TestAvroBase
             }
         }
 
+        CodecFactory.addCodec(compressionKind.toString(), getLegacyCodecFactory(compressionKind));
         ImmutableList.Builder<GenericRecord> testRecordsActual = ImmutableList.builder();
         try (DataFileReader<GenericRecord> genericRecordDataFileReader = new DataFileReader<>(
                 new AvroFileReader.TrinoDataInputStreamAsAvroSeekableInput(new TrinoDataInputStream(trinoLocalFilesystem.newInputFile(temp2).newStream()), trinoLocalFilesystem.newInputFile(temp2).length()),
@@ -334,6 +339,7 @@ public abstract class TestAvroBase
                 testRecordsActual.add(genericRecordDataFileReader.next());
             }
         }
+        CodecFactory.addCodec(compressionKind.toString(), compressionKind.getTrinoCodecFactory());
         assertThat(testRecordsExpected.build().size()).isEqualTo(testRecordsActual.build().size());
         List<GenericRecord> expected = testRecordsExpected.build();
         List<GenericRecord> actual = testRecordsActual.build();
@@ -401,8 +407,14 @@ public abstract class TestAvroBase
     protected TrinoInputFile createWrittenFileWithData(Schema schema, List<GenericRecord> records, Location location)
             throws IOException
     {
+        return createWrittenFileWithData(schema, records, location, nullCodec());
+    }
+
+    protected TrinoInputFile createWrittenFileWithData(Schema schema, List<GenericRecord> records, Location location, CodecFactory codecFactory)
+            throws IOException
+    {
         try (DataFileWriter<GenericRecord> fileWriter = new DataFileWriter<>(new GenericDatumWriter<>())) {
-            fileWriter.create(schema, trinoLocalFilesystem.newOutputFile(location).createOrOverwrite());
+            fileWriter.setCodec(codecFactory).create(schema, trinoLocalFilesystem.newOutputFile(location).createOrOverwrite());
             for (GenericRecord genericRecord : records) {
                 fileWriter.append(genericRecord);
             }
@@ -470,5 +482,15 @@ public abstract class TestAvroBase
             }
         }
         return fieldAssembler.endRecord();
+    }
+
+    static CodecFactory getLegacyCodecFactory(AvroCompressionKind compressionKind)
+    {
+        return switch (compressionKind) {
+            case NULL -> CodecFactory.nullCodec();
+            case DEFLATE -> CodecFactory.deflateCodec(DEFAULT_DEFLATE_LEVEL);
+            case SNAPPY -> CodecFactory.snappyCodec();
+            case ZSTANDARD -> CodecFactory.zstandardCodec(DEFAULT_ZSTANDARD_LEVEL, DEFAULT_ZSTANDARD_BUFFERPOOL);
+        };
     }
 }
