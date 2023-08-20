@@ -11,19 +11,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.cassandra;
+package io.trino.plugin.scylla;
 
-import java.io.Closeable;
+import io.trino.plugin.cassandra.CassandraConnectorFactory;
 
-public interface CassandraServer
-        extends Closeable
+public class ScyllaConnectorFactory
+        extends CassandraConnectorFactory
 {
-    CassandraSession getSession();
-
-    String getHost();
-
-    int getPort();
-
-    void refreshSizeEstimates(String keyspace, String table)
-            throws Exception;
+    @Override
+    public String getName()
+    {
+        return "scylla";
+    }
 }
