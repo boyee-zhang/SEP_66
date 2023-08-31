@@ -11,13 +11,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.sql.gen;
+package io.trino.operator.aggregation.state;
 
-import io.trino.sql.relational.RowExpression;
-
-import java.util.List;
-
-public interface BodyCompiler
-{
-    void generateMethods(ClassBuilder classBuilder, RowExpression filter, List<RowExpression> projections);
-}
+public abstract class CustomValue {}

@@ -18,10 +18,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.primitives.Primitives;
-import io.airlift.bytecode.Access;
 import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.BytecodeNode;
-import io.airlift.bytecode.ClassDefinition;
 import io.airlift.bytecode.FieldDefinition;
 import io.airlift.bytecode.MethodDefinition;
 import io.airlift.bytecode.Parameter;
@@ -30,7 +28,6 @@ import io.airlift.bytecode.Scope;
 import io.airlift.bytecode.Variable;
 import io.airlift.bytecode.expression.BytecodeExpression;
 import io.trino.metadata.FunctionManager;
-import io.trino.operator.aggregation.AccumulatorCompiler;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.ConstantExpression;
@@ -44,30 +41,43 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 
+import java.lang.invoke.CallSite;
+import java.lang.invoke.LambdaConversionException;
+import java.lang.invoke.LambdaMetafactory;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.function.Supplier;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.airlift.bytecode.Access.FINAL;
 import static io.airlift.bytecode.Access.PRIVATE;
 import static io.airlift.bytecode.Access.PUBLIC;
+import static io.airlift.bytecode.Access.STATIC;
 import static io.airlift.bytecode.Access.a;
 import static io.airlift.bytecode.Parameter.arg;
 import static io.airlift.bytecode.ParameterizedType.type;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantFalse;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeDynamic;
+import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
 import static io.trino.spi.StandardErrorCode.COMPILER_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.gen.BytecodeUtils.boxPrimitiveIfNecessary;
 import static io.trino.sql.gen.BytecodeUtils.unboxPrimitiveIfNecessary;
 import static io.trino.sql.gen.LambdaCapture.LAMBDA_CAPTURE_METHOD;
 import static io.trino.sql.gen.LambdaExpressionExtractor.extractLambdaExpressions;
-import static io.trino.util.CompilerUtils.defineClass;
-import static io.trino.util.CompilerUtils.makeClassName;
 import static io.trino.util.Failures.checkCondition;
+import static java.lang.invoke.MethodHandles.explicitCastArguments;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.lang.invoke.MethodHandles.privateLookupIn;
+import static java.lang.invoke.MethodType.methodType;
 import static java.util.Objects.requireNonNull;
 import static org.objectweb.asm.Type.getMethodType;
 import static org.objectweb.asm.Type.getType;
@@ -77,8 +87,69 @@ public final class LambdaBytecodeGenerator
     private LambdaBytecodeGenerator() {}
 
     public static Map<LambdaDefinitionExpression, CompiledLambda> generateMethodsForLambda(
-            ClassDefinition containerClassDefinition,
-            CallSiteBinder callSiteBinder,
+            RowExpression expression,
+            CachedInstanceBinder callerCachedInstanceBinder,
+            FunctionManager functionManager)
+    {
+        if (extractLambdaExpressions(expression).isEmpty()) {
+            return ImmutableMap.of();
+        }
+
+        // Lambda functions are generated into a new non-hidden class, because lambda metafactory
+        // currently requires direct method handles on non-hidden classes
+        ClassBuilder classBuilder = ClassBuilder.createStandardClass(
+                lookup(),
+                a(PUBLIC, FINAL),
+                "LambdaMethods",
+                type(Object.class));
+
+        // Private method to fetch a full access Lookup for this generated class
+        // This is required because this class is in a separate classloader and thus a different unnamed module
+        // and there does not seem any other way to get a full access method handle across class loaders
+        classBuilder.declareMethod(a(PRIVATE, STATIC), "lookup", type(Lookup.class))
+                .getBody()
+                .append(invokeStatic(MethodHandles.class, "lookup", Lookup.class).ret());
+
+        // generate the lambda methods inside the new class
+        CachedInstanceBinder cachedInstanceBinder = new CachedInstanceBinder(classBuilder);
+        Map<LambdaDefinitionExpression, CompiledLambda> generatedMethods = generateMethodsForLambdaInternal(
+                classBuilder,
+                cachedInstanceBinder,
+                expression,
+                functionManager);
+
+        // create constructor which initializes the fields inside the cached instance binder
+        MethodDefinition constructorDefinition = classBuilder.declareConstructor(a(PUBLIC));
+        BytecodeBlock constructorBody = constructorDefinition.getBody();
+        Variable thisVariable = constructorDefinition.getThis();
+        constructorBody.comment("super();")
+                .append(thisVariable)
+                .invokeConstructor(Object.class);
+        cachedInstanceBinder.generateInitializations(thisVariable, constructorBody);
+        constructorBody.ret();
+
+        // define the new class
+        Class<?> lambdaClass = classBuilder.defineClass();
+
+        // create a cached instance of the new class in the callers cached instance binder
+        MethodHandle constructor;
+        try {
+            constructor = lookup().findConstructor(lambdaClass, methodType(void.class));
+        }
+        catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+        // the field must be of type Object, because the new class is not visible to the caller's class
+        FieldDefinition cachedInstance = callerCachedInstanceBinder.getCachedInstance(constructor.asType(methodType(Object.class)));
+
+        // update all CompiledLambda with references to the new class, so a lambda metafactory can be bound directly into the caller
+        return generatedMethods.entrySet()
+                .stream()
+                .collect(toImmutableMap(Entry::getKey, entry -> entry.getValue().withLoadedClass(lambdaClass, cachedInstance)));
+    }
+
+    private static Map<LambdaDefinitionExpression, CompiledLambda> generateMethodsForLambdaInternal(
+            ClassBuilder classBuilder,
             CachedInstanceBinder cachedInstanceBinder,
             RowExpression expression,
             FunctionManager functionManager)
@@ -91,9 +162,8 @@ public final class LambdaBytecodeGenerator
             CompiledLambda compiledLambda = preGenerateLambdaExpression(
                     lambdaExpression,
                     "lambda_" + counter,
-                    containerClassDefinition,
+                    classBuilder,
                     compiledLambdaMap.buildOrThrow(),
-                    callSiteBinder,
                     cachedInstanceBinder,
                     functionManager);
             compiledLambdaMap.put(lambdaExpression, compiledLambda);
@@ -106,12 +176,11 @@ public final class LambdaBytecodeGenerator
     /**
      * @return a MethodHandle field that represents the lambda expression
      */
-    public static CompiledLambda preGenerateLambdaExpression(
+    private static CompiledLambda preGenerateLambdaExpression(
             LambdaDefinitionExpression lambdaExpression,
             String methodName,
-            ClassDefinition classDefinition,
+            ClassBuilder classBuilder,
             Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap,
-            CallSiteBinder callSiteBinder,
             CachedInstanceBinder cachedInstanceBinder,
             FunctionManager functionManager)
     {
@@ -128,7 +197,7 @@ public final class LambdaBytecodeGenerator
         }
 
         RowExpressionCompiler innerExpressionCompiler = new RowExpressionCompiler(
-                callSiteBinder,
+                classBuilder,
                 cachedInstanceBinder,
                 variableReferenceCompiler(parameterMapBuilder.buildOrThrow()),
                 functionManager,
@@ -136,7 +205,7 @@ public final class LambdaBytecodeGenerator
 
         return defineLambdaMethod(
                 innerExpressionCompiler,
-                classDefinition,
+                classBuilder,
                 methodName,
                 parameters.build(),
                 lambdaExpression);
@@ -144,14 +213,14 @@ public final class LambdaBytecodeGenerator
 
     private static CompiledLambda defineLambdaMethod(
             RowExpressionCompiler innerExpressionCompiler,
-            ClassDefinition classDefinition,
+            ClassBuilder classBuilder,
             String methodName,
             List<Parameter> inputParameters,
             LambdaDefinitionExpression lambda)
     {
         checkCondition(inputParameters.size() <= 254, NOT_SUPPORTED, "Too many arguments for lambda expression");
         Class<?> returnType = Primitives.wrap(lambda.getBody().getType().getJavaType());
-        MethodDefinition method = classDefinition.declareMethod(a(PUBLIC), methodName, type(returnType), inputParameters);
+        MethodDefinition method = classBuilder.declareMethod(a(PUBLIC), methodName, type(returnType), inputParameters);
 
         Scope scope = method.getScope();
         Variable wasNull = scope.declareVariable(boolean.class, "wasNull");
@@ -162,17 +231,7 @@ public final class LambdaBytecodeGenerator
                 .append(boxPrimitiveIfNecessary(scope, returnType))
                 .ret(returnType);
 
-        Handle lambdaAsmHandle = new Handle(
-                Opcodes.H_INVOKEVIRTUAL,
-                method.getThis().getType().getClassName(),
-                method.getName(),
-                method.getMethodDescriptor(),
-                false);
-
-        return new CompiledLambda(
-                lambdaAsmHandle,
-                method.getReturnType(),
-                method.getParameterTypes());
+        return new CompiledLambda(method);
     }
 
     public static BytecodeNode generateLambda(
@@ -203,52 +262,90 @@ public final class LambdaBytecodeGenerator
             captureVariableBuilder.add(valueVariable);
         }
 
-        List<BytecodeExpression> captureVariables = ImmutableList.<BytecodeExpression>builder()
-                .add(scope.getThis(), scope.getVariable("session"))
-                .addAll(captureVariableBuilder.build())
-                .build();
+        // is this a nested lambda call or a direct call from another class
+        Method singleApplyMethod = getSingleApplyMethod(lambdaInterface);
+        if (compiledLambda.getLambdaClass() == null) {
+            List<BytecodeExpression> captureVariables = ImmutableList.<BytecodeExpression>builder()
+                    .add(scope.getThis())
+                    .add(scope.getVariable("session"))
+                    .addAll(captureVariableBuilder.build())
+                    .build();
 
-        Type instantiatedMethodAsmType = getMethodType(
-                compiledLambda.getReturnType().getAsmType(),
-                compiledLambda.getParameterTypes().stream()
-                        .skip(captureExpressions.size() + 1) // skip capture variables and ConnectorSession
-                        .map(ParameterizedType::getAsmType)
-                        .toArray(Type[]::new));
+            Type instantiatedMethodAsmType = getMethodType(
+                    compiledLambda.getReturnType().getAsmType(),
+                    compiledLambda.getParameterTypes().stream()
+                            .skip(captureExpressions.size() + 1) // skip capture variables and ConnectorSession
+                            .map(ParameterizedType::getAsmType)
+                            .toArray(Type[]::new));
 
-        block.append(
-                invokeDynamic(
-                        LAMBDA_CAPTURE_METHOD,
-                        ImmutableList.of(
-                                getType(getSingleApplyMethod(lambdaInterface)),
-                                compiledLambda.getLambdaAsmHandle(),
-                                instantiatedMethodAsmType),
-                        "apply",
-                        type(lambdaInterface),
-                        captureVariables));
+            // generate invoke dynamic to lambda meta factory for a method on the class currently being built
+            block.append(
+                    invokeDynamic(
+                            LAMBDA_CAPTURE_METHOD,
+                            ImmutableList.of(
+                                    getType(singleApplyMethod),
+                                    compiledLambda.getLambdaAsmHandle(),
+                                    instantiatedMethodAsmType),
+                            singleApplyMethod.getName(),
+                            type(lambdaInterface),
+                            captureVariables));
+        }
+        else {
+            ImmutableList.Builder<Class<?>> callSiteParameterTypes = ImmutableList.builder();
+            callSiteParameterTypes.add(compiledLambda.getLambdaClass());
+            callSiteParameterTypes.add(ConnectorSession.class);
+            for (RowExpression captureExpression : captureExpressions) {
+                callSiteParameterTypes.add(Primitives.wrap(captureExpression.getType().getJavaType()));
+            }
+
+            List<BytecodeExpression> captureVariables = ImmutableList.<BytecodeExpression>builder()
+                    .add(scope.getThis().getField(compiledLambda.getCachedInstance()), scope.getVariable("session"))
+                    .addAll(captureVariableBuilder.build())
+                    .build();
+
+            try {
+                // create the lambda meta right here
+                CallSite metafactory = LambdaMetafactory.metafactory(
+                        compiledLambda.getLambdaLookup(),
+                        singleApplyMethod.getName(),
+                        methodType(lambdaInterface, callSiteParameterTypes.build()),
+                        methodType(singleApplyMethod.getReturnType(), singleApplyMethod.getParameterTypes()),
+                        compiledLambda.getMethodHandle(),
+                        compiledLambda.getMethodHandle().type().dropParameterTypes(0, captureVariables.size()));
+
+                // extract the method handle from the call site
+                MethodHandle factoryMethodHandle = metafactory.getTarget();
+                // modify the factory handle to accept an Object instead of the actual target type, because the caller class
+                // cannot see the lambda class, which is in a separate class loader
+                factoryMethodHandle = explicitCastArguments(factoryMethodHandle, factoryMethodHandle.type().changeParameterType(0, Object.class));
+                block.append(context.getClassBuilder().invoke(factoryMethodHandle, "ignored", captureVariables));
+            }
+            catch (LambdaConversionException e) {
+                throw new RuntimeException(e);
+            }
+        }
         return block;
     }
 
     public static Class<? extends Supplier<Object>> compileLambdaProvider(LambdaDefinitionExpression lambdaExpression, FunctionManager functionManager, Class<?> lambdaInterface)
     {
-        ClassDefinition lambdaProviderClassDefinition = new ClassDefinition(
-                a(PUBLIC, Access.FINAL),
-                makeClassName("LambdaProvider"),
+        ClassBuilder lambdaProviderClassBuilder = ClassBuilder.createHiddenClass(
+                lookup(),
+                a(PUBLIC, FINAL),
+                "LambdaProvider",
                 type(Object.class),
                 type(Supplier.class, Object.class));
 
-        FieldDefinition sessionField = lambdaProviderClassDefinition.declareField(a(PRIVATE), "session", ConnectorSession.class);
+        FieldDefinition sessionField = lambdaProviderClassBuilder.declareField(a(PRIVATE), "session", ConnectorSession.class);
 
-        CallSiteBinder callSiteBinder = new CallSiteBinder();
-        CachedInstanceBinder cachedInstanceBinder = new CachedInstanceBinder(lambdaProviderClassDefinition, callSiteBinder);
+        CachedInstanceBinder cachedInstanceBinder = new CachedInstanceBinder(lambdaProviderClassBuilder);
 
         Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap = generateMethodsForLambda(
-                lambdaProviderClassDefinition,
-                callSiteBinder,
-                cachedInstanceBinder,
                 lambdaExpression,
+                cachedInstanceBinder,
                 functionManager);
 
-        MethodDefinition method = lambdaProviderClassDefinition.declareMethod(
+        MethodDefinition method = lambdaProviderClassBuilder.declareMethod(
                 a(PUBLIC),
                 "get",
                 type(Object.class),
@@ -260,7 +357,7 @@ public final class LambdaBytecodeGenerator
         scope.declareVariable("session", body, method.getThis().getField(sessionField));
 
         RowExpressionCompiler rowExpressionCompiler = new RowExpressionCompiler(
-                callSiteBinder,
+                lambdaProviderClassBuilder,
                 cachedInstanceBinder,
                 variableReferenceCompiler(ImmutableMap.of()),
                 functionManager,
@@ -269,7 +366,7 @@ public final class LambdaBytecodeGenerator
         BytecodeGeneratorContext generatorContext = new BytecodeGeneratorContext(
                 rowExpressionCompiler,
                 scope,
-                callSiteBinder,
+                lambdaProviderClassBuilder,
                 cachedInstanceBinder,
                 functionManager);
 
@@ -284,7 +381,7 @@ public final class LambdaBytecodeGenerator
         // constructor
         Parameter sessionParameter = arg("session", ConnectorSession.class);
 
-        MethodDefinition constructorDefinition = lambdaProviderClassDefinition.declareConstructor(a(PUBLIC), sessionParameter);
+        MethodDefinition constructorDefinition = lambdaProviderClassBuilder.declareConstructor(a(PUBLIC), sessionParameter);
         BytecodeBlock constructorBody = constructorDefinition.getBody();
         Variable constructorThisVariable = constructorDefinition.getThis();
 
@@ -297,7 +394,7 @@ public final class LambdaBytecodeGenerator
         constructorBody.ret();
 
         //noinspection unchecked
-        return (Class<? extends Supplier<Object>>) defineClass(lambdaProviderClassDefinition, Supplier.class, callSiteBinder.getBindings(), AccumulatorCompiler.class.getClassLoader());
+        return (Class<? extends Supplier<Object>>) lambdaProviderClassBuilder.defineClass(Supplier.class);
     }
 
     private static Method getSingleApplyMethod(Class<?> lambdaFunctionInterface)
@@ -361,19 +458,55 @@ public final class LambdaBytecodeGenerator
 
     static class CompiledLambda
     {
-        // lambda method information
+        // Information for nested lambda calls which use indy to lambda metafactory
         private final Handle lambdaAsmHandle;
         private final ParameterizedType returnType;
         private final List<ParameterizedType> parameterTypes;
 
-        public CompiledLambda(
+        // Information for normal lambda calls from expressions, which use constant dynamic to a pre created lambda metafactory
+        private final Class<?> lambdaClass;
+        private final FieldDefinition cachedInstance;
+        private final Lookup lambdaLookup;
+        private final MethodHandle methodHandle;
+
+        private CompiledLambda(MethodDefinition method)
+        {
+            lambdaAsmHandle = new Handle(
+                    Opcodes.H_INVOKEVIRTUAL,
+                    method.getThis().getType().getClassName(),
+                    method.getName(),
+                    method.getMethodDescriptor(),
+                    false);
+            returnType = method.getReturnType();
+            parameterTypes = method.getParameterTypes();
+
+            cachedInstance = null;
+            lambdaLookup = null;
+            lambdaClass = null;
+            methodHandle = null;
+        }
+
+        private CompiledLambda(
                 Handle lambdaAsmHandle,
                 ParameterizedType returnType,
-                List<ParameterizedType> parameterTypes)
+                List<ParameterizedType> parameterTypes,
+                Class<?> lambdaClass,
+                FieldDefinition cachedInstance)
         {
             this.lambdaAsmHandle = requireNonNull(lambdaAsmHandle, "lambdaAsmHandle is null");
             this.returnType = requireNonNull(returnType, "returnType is null");
-            this.parameterTypes = ImmutableList.copyOf(requireNonNull(parameterTypes, "parameterTypes is null"));
+            this.parameterTypes = requireNonNull(parameterTypes, "parameterTypes is null");
+
+            this.lambdaClass = lambdaClass;
+            this.cachedInstance = cachedInstance;
+            try {
+                this.lambdaLookup = (Lookup) privateLookupIn(lambdaClass, lookup()).findStatic(lambdaClass, "lookup", methodType(Lookup.class)).invoke();
+                Method method = Arrays.stream(lambdaClass.getMethods()).filter(m -> lambdaAsmHandle.getName().equals(m.getName())).findFirst().orElseThrow();
+                this.methodHandle = lambdaLookup.unreflect(method);
+            }
+            catch (Throwable e) {
+                throw new RuntimeException(e);
+            }
         }
 
         public Handle getLambdaAsmHandle()
@@ -389,6 +522,31 @@ public final class LambdaBytecodeGenerator
         public List<ParameterizedType> getParameterTypes()
         {
             return parameterTypes;
+        }
+
+        public Class<?> getLambdaClass()
+        {
+            return lambdaClass;
+        }
+
+        public FieldDefinition getCachedInstance()
+        {
+            return cachedInstance;
+        }
+
+        public Lookup getLambdaLookup()
+        {
+            return lambdaLookup;
+        }
+
+        public MethodHandle getMethodHandle()
+        {
+            return methodHandle;
+        }
+
+        public CompiledLambda withLoadedClass(Class<?> lambdaClass, FieldDefinition cachedInstance)
+        {
+            return new CompiledLambda(lambdaAsmHandle, returnType, parameterTypes, lambdaClass, cachedInstance);
         }
     }
 }

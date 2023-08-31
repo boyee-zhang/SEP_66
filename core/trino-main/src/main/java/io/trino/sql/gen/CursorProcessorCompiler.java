@@ -13,11 +13,8 @@
  */
 package io.trino.sql.gen;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.BytecodeNode;
-import io.airlift.bytecode.ClassDefinition;
 import io.airlift.bytecode.MethodDefinition;
 import io.airlift.bytecode.Parameter;
 import io.airlift.bytecode.Scope;
@@ -46,7 +43,6 @@ import io.trino.sql.relational.VariableReferenceExpression;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static io.airlift.bytecode.Access.PUBLIC;
 import static io.airlift.bytecode.Access.a;
@@ -57,7 +53,7 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
 import static io.airlift.bytecode.expression.BytecodeExpressions.or;
 import static io.airlift.bytecode.instruction.JumpInstruction.jump;
 import static io.trino.sql.gen.BytecodeUtils.generateWrite;
-import static io.trino.sql.gen.LambdaExpressionExtractor.extractLambdaExpressions;
+import static io.trino.sql.gen.LambdaBytecodeGenerator.generateMethodsForLambda;
 import static java.lang.String.format;
 
 public class CursorProcessorCompiler
@@ -71,22 +67,22 @@ public class CursorProcessorCompiler
     }
 
     @Override
-    public void generateMethods(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, RowExpression filter, List<RowExpression> projections)
+    public void generateMethods(ClassBuilder classBuilder, RowExpression filter, List<RowExpression> projections)
     {
-        CachedInstanceBinder cachedInstanceBinder = new CachedInstanceBinder(classDefinition, callSiteBinder);
+        CachedInstanceBinder cachedInstanceBinder = new CachedInstanceBinder(classBuilder);
 
-        generateProcessMethod(classDefinition, projections.size());
+        generateProcessMethod(classBuilder, projections.size());
 
-        Map<LambdaDefinitionExpression, CompiledLambda> filterCompiledLambdaMap = generateMethodsForLambda(classDefinition, callSiteBinder, cachedInstanceBinder, filter, "filter");
-        generateFilterMethod(classDefinition, callSiteBinder, cachedInstanceBinder, filterCompiledLambdaMap, filter);
+        Map<LambdaDefinitionExpression, CompiledLambda> filterCompiledLambdaMap = generateMethodsForLambda(filter, cachedInstanceBinder, functionManager);
+        generateFilterMethod(classBuilder, cachedInstanceBinder, filterCompiledLambdaMap, filter);
 
         for (int i = 0; i < projections.size(); i++) {
             String methodName = "project_" + i;
-            Map<LambdaDefinitionExpression, CompiledLambda> projectCompiledLambdaMap = generateMethodsForLambda(classDefinition, callSiteBinder, cachedInstanceBinder, projections.get(i), methodName);
-            generateProjectMethod(classDefinition, callSiteBinder, cachedInstanceBinder, projectCompiledLambdaMap, methodName, projections.get(i));
+            Map<LambdaDefinitionExpression, CompiledLambda> projectCompiledLambdaMap = generateMethodsForLambda(projections.get(i), cachedInstanceBinder, functionManager);
+            generateProjectMethod(classBuilder, cachedInstanceBinder, projectCompiledLambdaMap, methodName, projections.get(i));
         }
 
-        MethodDefinition constructorDefinition = classDefinition.declareConstructor(a(PUBLIC));
+        MethodDefinition constructorDefinition = classBuilder.declareConstructor(a(PUBLIC));
         BytecodeBlock constructorBody = constructorDefinition.getBody();
         Variable thisVariable = constructorDefinition.getThis();
         constructorBody.comment("super();")
@@ -97,13 +93,13 @@ public class CursorProcessorCompiler
         constructorBody.ret();
     }
 
-    private static void generateProcessMethod(ClassDefinition classDefinition, int projections)
+    private static void generateProcessMethod(ClassBuilder classBuilder, int projections)
     {
         Parameter session = arg("session", ConnectorSession.class);
         Parameter yieldSignal = arg("yieldSignal", DriverYieldSignal.class);
         Parameter cursor = arg("cursor", RecordCursor.class);
         Parameter pageBuilder = arg("pageBuilder", PageBuilder.class);
-        MethodDefinition method = classDefinition.declareMethod(a(PUBLIC), "process", type(CursorProcessorOutput.class), session, yieldSignal, cursor, pageBuilder);
+        MethodDefinition method = classBuilder.declareMethod(a(PUBLIC), "process", type(CursorProcessorOutput.class), session, yieldSignal, cursor, pageBuilder);
 
         Scope scope = method.getScope();
         Variable completedPositionsVariable = scope.declareVariable(int.class, "completedPositions");
@@ -133,7 +129,7 @@ public class CursorProcessorCompiler
                                         .putVariable(finishedVariable, true)
                                         .gotoLabel(done)))
                         .comment("do the projection")
-                        .append(createProjectIfStatement(classDefinition, method, session, cursor, pageBuilder, projections))
+                        .append(createProjectIfStatement(classBuilder, method, session, cursor, pageBuilder, projections))
                         .comment("completedPositions++;")
                         .incrementVariable(completedPositionsVariable, (byte) 1));
 
@@ -145,7 +141,7 @@ public class CursorProcessorCompiler
     }
 
     private static IfStatement createProjectIfStatement(
-            ClassDefinition classDefinition,
+            ClassBuilder classBuilder,
             MethodDefinition method,
             Parameter session,
             Parameter cursor,
@@ -158,7 +154,7 @@ public class CursorProcessorCompiler
                 .append(method.getThis())
                 .getVariable(session)
                 .getVariable(cursor)
-                .invokeVirtual(classDefinition.getType(), "filter", type(boolean.class), type(ConnectorSession.class), type(RecordCursor.class));
+                .invokeVirtual(classBuilder.getType(), "filter", type(boolean.class), type(ConnectorSession.class), type(RecordCursor.class));
 
         // pageBuilder.declarePosition();
         ifStatement.ifTrue()
@@ -180,7 +176,7 @@ public class CursorProcessorCompiler
 
             // project(block..., blockBuilder)gen
             ifStatement.ifTrue()
-                    .invokeVirtual(classDefinition.getType(),
+                    .invokeVirtual(classBuilder.getType(),
                             "project_" + projectionIndex,
                             type(void.class),
                             type(ConnectorSession.class),
@@ -190,45 +186,15 @@ public class CursorProcessorCompiler
         return ifStatement;
     }
 
-    private Map<LambdaDefinitionExpression, CompiledLambda> generateMethodsForLambda(
-            ClassDefinition containerClassDefinition,
-            CallSiteBinder callSiteBinder,
-            CachedInstanceBinder cachedInstanceBinder,
-            RowExpression projection,
-            String methodPrefix)
-    {
-        Set<LambdaDefinitionExpression> lambdaExpressions = ImmutableSet.copyOf(extractLambdaExpressions(projection));
-
-        ImmutableMap.Builder<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap = ImmutableMap.builder();
-
-        int counter = 0;
-        for (LambdaDefinitionExpression lambdaExpression : lambdaExpressions) {
-            String methodName = methodPrefix + "_lambda_" + counter;
-            CompiledLambda compiledLambda = LambdaBytecodeGenerator.preGenerateLambdaExpression(
-                    lambdaExpression,
-                    methodName,
-                    containerClassDefinition,
-                    compiledLambdaMap.buildOrThrow(),
-                    callSiteBinder,
-                    cachedInstanceBinder,
-                    functionManager);
-            compiledLambdaMap.put(lambdaExpression, compiledLambda);
-            counter++;
-        }
-
-        return compiledLambdaMap.buildOrThrow();
-    }
-
     private void generateFilterMethod(
-            ClassDefinition classDefinition,
-            CallSiteBinder callSiteBinder,
+            ClassBuilder classBuilder,
             CachedInstanceBinder cachedInstanceBinder,
             Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap,
             RowExpression filter)
     {
         Parameter session = arg("session", ConnectorSession.class);
         Parameter cursor = arg("cursor", RecordCursor.class);
-        MethodDefinition method = classDefinition.declareMethod(a(PUBLIC), "filter", type(boolean.class), session, cursor);
+        MethodDefinition method = classBuilder.declareMethod(a(PUBLIC), "filter", type(boolean.class), session, cursor);
 
         method.comment("Filter: %s", filter);
 
@@ -236,7 +202,7 @@ public class CursorProcessorCompiler
         Variable wasNullVariable = scope.declareVariable(type(boolean.class), "wasNull");
 
         RowExpressionCompiler compiler = new RowExpressionCompiler(
-                callSiteBinder,
+                classBuilder,
                 cachedInstanceBinder,
                 fieldReferenceCompiler(cursor),
                 functionManager,
@@ -258,8 +224,7 @@ public class CursorProcessorCompiler
     }
 
     private void generateProjectMethod(
-            ClassDefinition classDefinition,
-            CallSiteBinder callSiteBinder,
+            ClassBuilder classBuilder,
             CachedInstanceBinder cachedInstanceBinder,
             Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap,
             String methodName,
@@ -268,7 +233,7 @@ public class CursorProcessorCompiler
         Parameter session = arg("session", ConnectorSession.class);
         Parameter cursor = arg("cursor", RecordCursor.class);
         Parameter output = arg("output", BlockBuilder.class);
-        MethodDefinition method = classDefinition.declareMethod(a(PUBLIC), methodName, type(void.class), session, cursor, output);
+        MethodDefinition method = classBuilder.declareMethod(a(PUBLIC), methodName, type(void.class), session, cursor, output);
 
         method.comment("Projection: %s", projection);
 
@@ -276,7 +241,7 @@ public class CursorProcessorCompiler
         Variable wasNullVariable = scope.declareVariable(type(boolean.class), "wasNull");
 
         RowExpressionCompiler compiler = new RowExpressionCompiler(
-                callSiteBinder,
+                classBuilder,
                 cachedInstanceBinder,
                 fieldReferenceCompiler(cursor),
                 functionManager,
@@ -288,7 +253,7 @@ public class CursorProcessorCompiler
                 .getVariable(output)
                 .comment("evaluate projection: " + projection.toString())
                 .append(compiler.compile(projection, scope))
-                .append(generateWrite(callSiteBinder, scope, wasNullVariable, projection.getType()))
+                .append(generateWrite(classBuilder, scope, wasNullVariable, projection.getType()))
                 .ret();
     }
 

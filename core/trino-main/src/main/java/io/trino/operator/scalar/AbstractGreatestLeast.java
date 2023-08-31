@@ -13,10 +13,7 @@
  */
 package io.trino.operator.scalar;
 
-import com.google.common.collect.ImmutableList;
 import io.airlift.bytecode.BytecodeBlock;
-import io.airlift.bytecode.ClassDefinition;
-import io.airlift.bytecode.DynamicClassLoader;
 import io.airlift.bytecode.MethodDefinition;
 import io.airlift.bytecode.Parameter;
 import io.airlift.bytecode.Scope;
@@ -32,7 +29,7 @@ import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.Signature;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
-import io.trino.sql.gen.CallSiteBinder;
+import io.trino.sql.gen.ClassBuilder;
 
 import java.lang.invoke.MethodHandle;
 import java.util.List;
@@ -49,7 +46,6 @@ import static io.airlift.bytecode.Access.a;
 import static io.airlift.bytecode.Parameter.arg;
 import static io.airlift.bytecode.ParameterizedType.type;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantNull;
-import static io.airlift.bytecode.expression.BytecodeExpressions.invokeDynamic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.isNull;
 import static io.airlift.bytecode.expression.BytecodeExpressions.or;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -58,13 +54,11 @@ import static io.trino.spi.function.InvocationConvention.InvocationArgumentConve
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
-import static io.trino.sql.gen.Bootstrap.BOOTSTRAP_METHOD;
-import static io.trino.util.CompilerUtils.defineClass;
-import static io.trino.util.CompilerUtils.makeClassName;
 import static io.trino.util.Failures.checkCondition;
 import static io.trino.util.MinMaxCompare.getMinMaxCompare;
 import static io.trino.util.MinMaxCompare.getMinMaxCompareFunctionDependencies;
 import static io.trino.util.Reflection.methodHandle;
+import static java.lang.invoke.MethodHandles.lookup;
 import static java.lang.invoke.MethodType.methodType;
 import static java.util.Collections.nCopies;
 import static java.util.stream.Collectors.joining;
@@ -127,18 +121,19 @@ public abstract class AbstractGreatestLeast
                 .map(Class::getSimpleName)
                 .collect(joining());
 
-        ClassDefinition definition = new ClassDefinition(
+        ClassBuilder classBuilder = ClassBuilder.createHiddenClass(
+                lookup(),
                 a(PUBLIC, FINAL),
-                makeClassName(javaTypeName + "$" + signature.getName()),
+                javaTypeName + "$" + signature.getName(),
                 type(Object.class));
 
-        definition.declareDefaultConstructor(a(PRIVATE));
+        classBuilder.declareDefaultConstructor(a(PRIVATE));
 
         List<Parameter> parameters = IntStream.range(0, javaTypes.size())
                 .mapToObj(i -> arg("arg" + i, javaTypes.get(i)))
                 .collect(toImmutableList());
 
-        MethodDefinition method = definition.declareMethod(
+        MethodDefinition method = classBuilder.declareMethod(
                 a(PUBLIC, STATIC),
                 signature.getName(),
                 type(wrap(javaTypes.get(0))),
@@ -146,8 +141,6 @@ public abstract class AbstractGreatestLeast
 
         Scope scope = method.getScope();
         BytecodeBlock body = method.getBody();
-
-        CallSiteBinder binder = new CallSiteBinder();
 
         Variable value = scope.declareVariable(wrap(javaTypes.get(0)), "value");
 
@@ -159,11 +152,9 @@ public abstract class AbstractGreatestLeast
         compareMethod = compareMethod.asType(methodType(boolean.class, compareMethod.type().wrap().parameterList()));
         for (int i = 0; i < javaTypes.size(); i++) {
             Parameter parameter = parameters.get(i);
-            BytecodeExpression invokeCompare = invokeDynamic(
-                    BOOTSTRAP_METHOD,
-                    ImmutableList.of(binder.bind(compareMethod).getBindingId()),
+            BytecodeExpression invokeCompare = classBuilder.invoke(
+                    compareMethod,
                     "compare",
-                    boolean.class,
                     parameter,
                     value);
             body.append(new IfStatement()
@@ -180,6 +171,6 @@ public abstract class AbstractGreatestLeast
 
         body.append(value.ret());
 
-        return defineClass(definition, Object.class, binder.getBindings(), new DynamicClassLoader(getClass().getClassLoader()));
+        return classBuilder.defineClass();
     }
 }

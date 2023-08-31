@@ -15,17 +15,16 @@ package io.trino.operator.aggregation.state;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.bytecode.DynamicClassLoader;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
 import io.trino.array.BlockBigArray;
-import io.trino.array.BooleanBigArray;
-import io.trino.array.ByteBigArray;
-import io.trino.array.DoubleBigArray;
-import io.trino.array.IntBigArray;
-import io.trino.array.LongBigArray;
 import io.trino.array.ReferenceCountMap;
 import io.trino.array.SliceBigArray;
+import io.trino.operator.aggregation.LongLongState;
+import io.trino.server.PluginManager;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
@@ -34,8 +33,11 @@ import io.trino.spi.function.AccumulatorStateFactory;
 import io.trino.spi.function.AccumulatorStateSerializer;
 import io.trino.spi.function.GroupedAccumulatorState;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
+import io.trino.sql.gen.IsolatedClass;
 import io.trino.util.Reflection;
 import org.testng.annotations.Test;
 
@@ -55,6 +57,7 @@ import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.util.StructuralTestUtil.mapBlockOf;
 import static io.trino.util.StructuralTestUtil.mapType;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
@@ -105,6 +108,36 @@ public class TestStateCompiler
         assertEquals(BIGINT.getLong(block, 0), state.getValue());
         serializer.deserialize(block, 0, deserializedState);
         assertEquals(deserializedState.getValue(), state.getValue());
+    }
+
+    @Test
+    public void testAccumulatorCompilerForTypeSpecificObjectParameterSeparateClassLoader()
+    {
+        TimestampType parameterType = TimestampType.TIMESTAMP_NANOS;
+        assertThat(parameterType.getJavaType()).isEqualTo(LongTimestamp.class);
+
+        ClassLoader pluginClassLoader = PluginManager.createClassLoader("test", ImmutableList.of());
+        DynamicClassLoader classLoader = new DynamicClassLoader(pluginClassLoader);
+        Class<? extends AccumulatorState> stateInterface = IsolatedClass.isolateClass(classLoader, AccumulatorState.class, LongLongState.class);
+
+        assertThat(StateCompiler.getMetadataAnnotation(stateInterface)).isNull();
+        AccumulatorStateSerializer<? extends AccumulatorState> serializer = StateCompiler.generateStateSerializer(stateInterface);
+        assertThat(serializer.getSerializedType()).isEqualTo(RowType.anonymousRow(BIGINT, BIGINT));
+        AccumulatorStateFactory<? extends AccumulatorState> factory = StateCompiler.generateStateFactory(stateInterface);
+        AccumulatorState singleState = factory.createSingleState();
+        assertThat(singleState.getEstimatedSize()).isEqualTo(32);
+        assertThat(singleState.copy()).isNotSameAs(singleState);
+
+        AccumulatorState groupedState = factory.createGroupedState();
+        assertThat(groupedState.getEstimatedSize()).isBetween(24L * 1024, 26L * 1024);
+        assertThat(groupedState).isInstanceOf(GroupedAccumulatorState.class);
+        GroupedAccumulatorState groupedAccumulatorState = (GroupedAccumulatorState) groupedState;
+        groupedAccumulatorState.ensureCapacity(4);
+        groupedAccumulatorState.setGroupId(2);
+
+        // test with a class that has custom value field in the class loader
+        Class<? extends AccumulatorState> customState = IsolatedClass.isolateClass(classLoader, AccumulatorState.class, ComplexState.class, CustomValue.class);
+        StateCompiler.generateStateFactory(customState);
     }
 
     @Test
@@ -243,15 +276,15 @@ public class TestStateCompiler
     {
         long retainedSize = instanceSize(state.getClass());
         // reflection is necessary because TestComplexState implementation is generated
-        Field[] fields = state.getClass().getDeclaredFields();
         try {
-            for (Field field : fields) {
-                Class<?> type = field.getType();
-                field.setAccessible(true);
-                if (type == BlockBigArray.class || type == BooleanBigArray.class || type == SliceBigArray.class ||
-                        type == ByteBigArray.class || type == DoubleBigArray.class || type == LongBigArray.class || type == IntBigArray.class) {
-                    MethodHandle sizeOf = Reflection.methodHandle(type, "sizeOf");
-                    retainedSize += (long) sizeOf.invokeWithArguments(field.get(state));
+            for (Field field : state.getClass().getDeclaredFields()) {
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(state);
+                    MethodHandle sizeOf = Reflection.methodHandle(value.getClass(), "sizeOf");
+                    retainedSize += (long) sizeOf.invokeWithArguments(value);
+                }
+                catch (TrinoException ignored) {
                 }
             }
         }
@@ -268,18 +301,16 @@ public class TestStateCompiler
         Field[] stateFields = state.getClass().getDeclaredFields();
         try {
             for (Field stateField : stateFields) {
-                if (stateField.getType() != BlockBigArray.class && stateField.getType() != SliceBigArray.class) {
-                    continue;
-                }
                 stateField.setAccessible(true);
-                Field[] bigArrayFields = stateField.getType().getDeclaredFields();
-                for (Field bigArrayField : bigArrayFields) {
-                    if (bigArrayField.getType() != ReferenceCountMap.class) {
-                        continue;
+                Object bigArray = stateField.get(state);
+                if (bigArray instanceof BlockBigArray || bigArray instanceof SliceBigArray) {
+                    for (Field bigArrayField : bigArray.getClass().getDeclaredFields()) {
+                        bigArrayField.setAccessible(true);
+                        Object value = bigArrayField.get(bigArray);
+                        if (value instanceof ReferenceCountMap referenceCountMap) {
+                            overhead += referenceCountMap.sizeOf();
+                        }
                     }
-                    bigArrayField.setAccessible(true);
-                    MethodHandle sizeOf = Reflection.methodHandle(bigArrayField.getType(), "sizeOf");
-                    overhead += (long) sizeOf.invokeWithArguments(bigArrayField.get(stateField.get(state)));
                 }
             }
         }

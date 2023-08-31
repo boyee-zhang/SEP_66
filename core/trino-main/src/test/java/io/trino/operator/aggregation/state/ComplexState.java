@@ -11,13 +11,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.sql.gen;
+package io.trino.operator.aggregation.state;
 
-import io.trino.sql.relational.RowExpression;
+import io.trino.spi.function.AccumulatorState;
 
-import java.util.List;
-
-public interface BodyCompiler
+public interface ComplexState
+        extends AccumulatorState
 {
-    void generateMethods(ClassBuilder classBuilder, RowExpression filter, List<RowExpression> projections);
+    CustomValue getUpdateSketch();
+
+    void setUpdateSketch(CustomValue value);
 }

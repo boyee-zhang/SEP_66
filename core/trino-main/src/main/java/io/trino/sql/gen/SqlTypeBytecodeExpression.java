@@ -17,55 +17,40 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.bytecode.BytecodeNode;
 import io.airlift.bytecode.MethodGenerationContext;
 import io.airlift.bytecode.expression.BytecodeExpression;
-import io.airlift.bytecode.instruction.InvokeInstruction;
 import io.airlift.slice.Slice;
 import io.trino.spi.type.Type;
 
-import java.lang.reflect.Method;
 import java.util.List;
 
 import static io.airlift.bytecode.ParameterizedType.type;
-import static io.trino.sql.gen.Bootstrap.BOOTSTRAP_METHOD;
 import static java.util.Objects.requireNonNull;
 
 public class SqlTypeBytecodeExpression
         extends BytecodeExpression
 {
-    public static SqlTypeBytecodeExpression constantType(CallSiteBinder callSiteBinder, Type type)
+    public static SqlTypeBytecodeExpression constantType(ClassBuilder classBuilder, Type type)
     {
-        requireNonNull(callSiteBinder, "callSiteBinder is null");
+        requireNonNull(classBuilder, "classBuilder is null");
         requireNonNull(type, "type is null");
 
-        Binding binding = callSiteBinder.bind(type, Type.class);
-        return new SqlTypeBytecodeExpression(type, binding, BOOTSTRAP_METHOD);
-    }
-
-    private static String generateName(Type type)
-    {
-        String name = type.getTypeSignature().toString();
-        if (name.length() > 20) {
-            // Use type base to reduce the identifier size in generated code
-            name = type.getBaseName();
-        }
-        return name.replaceAll("\\W+", "_");
+        BytecodeExpression loadConstant = classBuilder.loadConstant(type, Type.class);
+        return new SqlTypeBytecodeExpression(type, loadConstant);
     }
 
     private final Type type;
-    private final Binding binding;
-    private final Method bootstrapMethod;
+    private final BytecodeExpression expression;
 
-    private SqlTypeBytecodeExpression(Type type, Binding binding, Method bootstrapMethod)
+    public SqlTypeBytecodeExpression(Type type, BytecodeExpression expression)
     {
         super(type(Type.class));
         this.type = requireNonNull(type, "type is null");
-        this.binding = requireNonNull(binding, "binding is null");
-        this.bootstrapMethod = requireNonNull(bootstrapMethod, "bootstrapMethod is null");
+        this.expression = expression;
     }
 
     @Override
     public BytecodeNode getBytecode(MethodGenerationContext generationContext)
     {
-        return InvokeInstruction.invokeDynamic(generateName(type), binding.getType(), bootstrapMethod, binding.getBindingId());
+        return expression;
     }
 
     @Override

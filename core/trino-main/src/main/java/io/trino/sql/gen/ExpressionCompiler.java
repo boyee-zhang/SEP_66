@@ -19,7 +19,6 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.inject.Inject;
-import io.airlift.bytecode.ClassDefinition;
 import io.airlift.jmx.CacheStatsMBean;
 import io.trino.cache.NonEvictableLoadingCache;
 import io.trino.metadata.FunctionManager;
@@ -47,10 +46,8 @@ import static io.airlift.bytecode.Access.a;
 import static io.airlift.bytecode.ParameterizedType.type;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.sql.gen.BytecodeUtils.invoke;
 import static io.trino.sql.relational.Expressions.constant;
-import static io.trino.util.CompilerUtils.defineClass;
-import static io.trino.util.CompilerUtils.makeClassName;
+import static java.lang.invoke.MethodHandles.lookup;
 import static java.util.Objects.requireNonNull;
 
 public class ExpressionCompiler
@@ -147,35 +144,34 @@ public class ExpressionCompiler
             BodyCompiler bodyCompiler,
             Class<? extends T> superType)
     {
-        ClassDefinition classDefinition = new ClassDefinition(
+        ClassBuilder classBuilder = ClassBuilder.createHiddenClass(
+                lookup(),
                 a(PUBLIC, FINAL),
-                makeClassName(superType.getSimpleName()),
+                superType.getSimpleName(),
                 type(Object.class),
                 type(superType));
 
-        CallSiteBinder callSiteBinder = new CallSiteBinder();
-        bodyCompiler.generateMethods(classDefinition, callSiteBinder, filter, projections);
+        bodyCompiler.generateMethods(classBuilder, filter, projections);
 
         //
         // toString method
         //
         generateToString(
-                classDefinition,
-                callSiteBinder,
-                toStringHelper(classDefinition.getType().getJavaClassName())
+                classBuilder,
+                toStringHelper(classBuilder.getType().getJavaClassName())
                         .add("filter", filter)
                         .add("projections", projections)
                         .toString());
 
-        return defineClass(classDefinition, superType, callSiteBinder.getBindings(), getClass().getClassLoader());
+        return classBuilder.defineClass(superType);
     }
 
-    private static void generateToString(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, String string)
+    private static void generateToString(ClassBuilder classBuilder, String string)
     {
         // bind constant via invokedynamic to avoid constant pool issues due to large strings
-        classDefinition.declareMethod(a(PUBLIC), "toString", type(String.class))
+        classBuilder.declareMethod(a(PUBLIC), "toString", type(String.class))
                 .getBody()
-                .append(invoke(callSiteBinder.bind(string, String.class), "toString"))
+                .append(classBuilder.loadConstant(string, String.class))
                 .retObject();
     }
 

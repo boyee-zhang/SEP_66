@@ -16,8 +16,6 @@ package io.trino.sql.gen;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 import io.airlift.bytecode.BytecodeBlock;
-import io.airlift.bytecode.ClassDefinition;
-import io.airlift.bytecode.DynamicClassLoader;
 import io.airlift.bytecode.MethodDefinition;
 import io.airlift.bytecode.Parameter;
 import io.airlift.bytecode.Variable;
@@ -39,10 +37,8 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantString;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static io.trino.sql.gen.BytecodeUtils.loadConstant;
-import static io.trino.util.CompilerUtils.defineClass;
-import static io.trino.util.CompilerUtils.makeClassName;
 import static io.trino.util.Failures.checkCondition;
+import static java.lang.invoke.MethodHandles.lookup;
 
 public final class VarArgsToMapAdapterGenerator
 {
@@ -60,9 +56,12 @@ public final class VarArgsToMapAdapterGenerator
     public static MethodHandle generateVarArgsToMapAdapter(Class<?> returnType, List<Class<?>> javaTypes, List<String> names, Function<Map<String, Object>, Object> function)
     {
         checkCondition(javaTypes.size() <= 254, NOT_SUPPORTED, "Too many arguments for vararg function");
-        CallSiteBinder callSiteBinder = new CallSiteBinder();
 
-        ClassDefinition classDefinition = new ClassDefinition(a(PUBLIC, FINAL), makeClassName("VarArgsToMapAdapter"), type(Object.class));
+        ClassBuilder classBuilder = ClassBuilder.createHiddenClass(
+                lookup(),
+                a(PUBLIC, FINAL),
+                "VarArgsToMapAdapter",
+                type(Object.class));
 
         ImmutableList.Builder<Parameter> parameterListBuilder = ImmutableList.builder();
         for (int i = 0; i < javaTypes.size(); i++) {
@@ -71,7 +70,7 @@ public final class VarArgsToMapAdapterGenerator
         }
         ImmutableList<Parameter> parameterList = parameterListBuilder.build();
 
-        MethodDefinition methodDefinition = classDefinition.declareMethod(a(PUBLIC, STATIC), "varArgsToMap", type(returnType), parameterList);
+        MethodDefinition methodDefinition = classBuilder.declareMethod(a(PUBLIC, STATIC), "varArgsToMap", type(returnType), parameterList);
         BytecodeBlock body = methodDefinition.getBody();
 
         // ImmutableMap.Builder cannot be used here because it doesn't allow nulls.
@@ -83,12 +82,12 @@ public final class VarArgsToMapAdapterGenerator
             body.append(map.invoke("put", Object.class, constantString(names.get(i)).cast(Object.class), parameterList.get(i).cast(Object.class)));
         }
         body.append(
-                loadConstant(callSiteBinder, function, Function.class)
+                classBuilder.loadConstant(function, Function.class)
                         .invoke("apply", Object.class, map.cast(Object.class))
                         .cast(returnType)
                         .ret());
 
-        Class<?> generatedClass = defineClass(classDefinition, Object.class, callSiteBinder.getBindings(), new DynamicClassLoader(VarArgsToMapAdapterGenerator.class.getClassLoader()));
+        Class<?> generatedClass = classBuilder.defineClass();
         return Reflection.methodHandle(generatedClass, "varArgsToMap", javaTypes.toArray(new Class<?>[javaTypes.size()]));
     }
 }
