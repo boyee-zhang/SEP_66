@@ -537,7 +537,7 @@ public abstract class AbstractMockMetadata
     }
 
     @Override
-    public MergeHandle beginMerge(Session session, TableHandle tableHandle)
+    public MergeHandle beginMerge(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns)
     {
         throw new UnsupportedOperationException();
     }
