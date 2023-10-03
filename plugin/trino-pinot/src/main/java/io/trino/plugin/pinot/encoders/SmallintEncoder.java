@@ -11,14 +11,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.pinot;
+package io.trino.plugin.pinot.encoders;
 
-public class TestPinotConnectorSmokeTest
-        extends BasePinotConnectorSmokeTest
+import io.trino.spi.block.Block;
+
+public class SmallintEncoder
+        extends AbstractEncoder
 {
     @Override
-    protected boolean isSecured()
+    protected Object encodeNonNull(Block block, int position)
     {
-        return false;
+        return block.getShort(position, 0);
     }
 }

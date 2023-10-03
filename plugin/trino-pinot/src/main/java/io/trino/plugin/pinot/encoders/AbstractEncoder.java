@@ -11,28 +11,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.pinot;
+package io.trino.plugin.pinot.encoders;
 
-import static io.trino.plugin.pinot.TestingPinotCluster.PINOT_LATEST_IMAGE_NAME;
+import io.trino.spi.block.Block;
 
-public class TestPinotLatestNoGrpcConnectorSmokeTest
-        extends BasePinotConnectorSmokeTest
+public abstract class AbstractEncoder
+        implements Encoder
 {
-    @Override
-    protected boolean isSecured()
-    {
-        return false;
-    }
+    protected abstract Object encodeNonNull(Block block, int position);
 
     @Override
-    protected String getPinotImageName()
+    public Object encode(Block block, int position)
     {
-        return PINOT_LATEST_IMAGE_NAME;
-    }
-
-    @Override
-    protected boolean isGrpcEnabled()
-    {
-        return false;
+        if (block.isNull(position)) {
+            return null;
+        }
+        return encodeNonNull(block, position);
     }
 }
