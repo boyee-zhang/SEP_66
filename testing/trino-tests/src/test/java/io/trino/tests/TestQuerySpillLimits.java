@@ -95,7 +95,8 @@ public class TestQuerySpillLimits
                 .withFeaturesConfig(
                         new FeaturesConfig()
                                 .setSpillerSpillPaths(spillPath.getAbsolutePath())
-                                .setSpillEnabled(true))
+                                .setSpillEnabled(true)
+                                .setSpillMaxUsedSpaceThreshold(1.0))
                 .withNodeSpillConfig(nodeSpillConfig)
                 .withAlwaysRevokeMemory()
                 .build();
