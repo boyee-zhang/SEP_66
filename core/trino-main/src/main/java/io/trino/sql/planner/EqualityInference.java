@@ -45,6 +45,7 @@ import static io.trino.sql.ExpressionUtils.extractConjuncts;
 import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
 import static io.trino.sql.planner.ExpressionNodeInliner.replaceExpression;
 import static io.trino.sql.planner.NullabilityAnalyzer.mayReturnNullOnNonNullInput;
+import static io.trino.sql.planner.SafeExpressionEvaluator.isSafeExpression;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -261,7 +262,10 @@ public class EqualityInference
                 !mayReturnNullOnNonNullInput(expression)) {
             if (comparison.getOperator() == ComparisonExpression.Operator.EQUAL) {
                 // We should only consider equalities that have distinct left and right components
-                return !comparison.getLeft().equals(comparison.getRight());
+                if (comparison.getLeft().equals(comparison.getRight())) {
+                    return false;
+                }
+                return isSafeExpression(comparison.getLeft()) && isSafeExpression(comparison.getRight());
             }
         }
         return false;
