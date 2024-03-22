@@ -18,7 +18,6 @@ import jakarta.annotation.Nullable;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -57,11 +56,6 @@ public final class CompilerOperations
     public static boolean greaterThan(int left, int right)
     {
         return left > right;
-    }
-
-    public static boolean in(Object value, Set<?> set)
-    {
-        return set.contains(value);
     }
 
     public static boolean testMask(@Nullable Block masks, int index)

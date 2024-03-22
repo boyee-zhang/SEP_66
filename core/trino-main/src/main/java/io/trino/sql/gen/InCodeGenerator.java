@@ -29,7 +29,6 @@ import io.trino.spi.type.Type;
 import io.trino.sql.relational.ConstantExpression;
 import io.trino.sql.relational.RowExpression;
 import io.trino.sql.relational.SpecialForm;
-import io.trino.util.FastutilSetHelper;
 
 import java.lang.invoke.MethodHandle;
 import java.util.Collection;
@@ -41,7 +40,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantFalse;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantTrue;
-import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
+import static io.airlift.bytecode.expression.BytecodeExpressions.notEqual;
 import static io.airlift.bytecode.instruction.JumpInstruction.jump;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
@@ -177,7 +176,7 @@ public class InCodeGenerator
         SwitchBuilder switchBuilder = new SwitchBuilder().expression(expression);
 
         switch (switchGenerationCase) {
-            case DIRECT_SWITCH:
+            case DIRECT_SWITCH -> {
                 // A white-list is used to select types eligible for DIRECT_SWITCH.
                 // For these types, it's safe to not use Trino HASH_CODE and EQUAL operator.
                 for (Object constantValue : constantValues) {
@@ -186,14 +185,14 @@ public class InCodeGenerator
                 switchBuilder.defaultCase(jump(defaultLabel));
                 switchBlock = new BytecodeBlock()
                         .comment("lookupSwitch(<stackValue>))")
-                        .append(new IfStatement()
-                                .condition(invokeStatic(InCodeGenerator.class, "isInteger", boolean.class, value))
-                                .ifFalse(new BytecodeBlock()
+                        .append(new IfStatement("if (%s != (int) %s)", value.getName(), value.getName())
+                                .condition(notEqual(value, value.cast(int.class).cast(long.class)))
+                                .ifTrue(new BytecodeBlock()
                                         .gotoLabel(defaultLabel)))
                         .append(expression.set(value.cast(int.class)))
                         .append(switchBuilder.build());
-                break;
-            case HASH_SWITCH:
+            }
+            case HASH_SWITCH -> {
                 for (Map.Entry<Integer, Collection<BytecodeNode>> bucket : hashBuckets.asMap().entrySet()) {
                     Collection<BytecodeNode> testValues = bucket.getValue();
                     BytecodeBlock caseBlock = buildInCase(
@@ -219,8 +218,8 @@ public class InCodeGenerator
                         .invokeStatic(Long.class, "hashCode", int.class, long.class)
                         .putVariable(expression)
                         .append(switchBuilder.build());
-                break;
-            case SET_CONTAINS:
+            }
+            case SET_CONTAINS -> {
                 Set<?> constantValuesSet = toFastutilHashSet(constantValues, type, hashCodeMethodHandle, equalsMethodHandle);
                 Binding constant = generatorContext.getCallSiteBinder().bind(constantValuesSet, constantValuesSet.getClass());
 
@@ -228,16 +227,14 @@ public class InCodeGenerator
                         .comment("inListSet.contains(<stackValue>)")
                         .append(new IfStatement()
                                 .condition(new BytecodeBlock()
-                                        .comment("value")
-                                        .getVariable(value)
                                         .comment("set")
                                         .append(loadConstant(constant))
-                                        // TODO: use invokeVirtual on the set instead. This requires swapping the two elements in the stack
-                                        .invokeStatic(FastutilSetHelper.class, "in", boolean.class, javaType.isPrimitive() ? javaType : Object.class, constantValuesSet.getClass()))
+                                        .comment("value")
+                                        .getVariable(value)
+                                        .invokeVirtual(constantValuesSet.getClass(), "contains", boolean.class, javaType.isPrimitive() ? javaType : Object.class))
                                 .ifTrue(jump(match)));
-                break;
-            default:
-                throw new IllegalArgumentException("Not supported switch generation case: " + switchGenerationCase);
+            }
+            default -> throw new IllegalArgumentException("Not supported switch generation case: " + switchGenerationCase);
         }
 
         BytecodeBlock defaultCaseBlock = buildInCase(
@@ -279,11 +276,6 @@ public class InCodeGenerator
         block.visitLabel(end);
 
         return block;
-    }
-
-    public static boolean isInteger(long value)
-    {
-        return value == (int) value;
     }
 
     private static BytecodeBlock buildInCase(
