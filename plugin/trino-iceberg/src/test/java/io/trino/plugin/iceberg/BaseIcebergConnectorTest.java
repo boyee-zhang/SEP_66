@@ -1373,7 +1373,7 @@ public abstract class BaseIcebergConnectorTest
                             "commitdate, receiptdate, shipinstruct, shipmode, comment FROM " + table.getName(),
                     "SELECT orderkey, partkey, suppkey, linenumber, quantity, extendedprice, discount, tax, returnflag, linestatus, shipdate, " +
                             "commitdate, receiptdate, shipinstruct, shipmode, substring(comment, 2) FROM lineitem");
-            for (Object filePath : computeActual("SELECT file_path from \"" + table.getName() + "$files\"").getOnlyColumnAsSet()) {
+            for (Object filePath : computeActual("SELECT file_path from \"" + table.getName() + "$files\" where content != 1").getOnlyColumnAsSet()) {
                 assertThat(isFileSorted((String) filePath, "comment")).isTrue();
             }
         }

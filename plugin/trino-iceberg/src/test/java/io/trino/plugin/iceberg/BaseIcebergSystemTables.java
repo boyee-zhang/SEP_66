@@ -18,6 +18,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.QueryRunner;
+import org.apache.iceberg.FileContent;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -92,6 +93,13 @@ public abstract class BaseIcebergSystemTables
         assertUpdate("DELETE FROM test_schema.test_table_with_dml WHERE _date = DATE '2022-02-02' AND _varchar = 'b2'", 1);
         assertUpdate("INSERT INTO test_schema.test_table_with_dml VALUES ('c3', DATE '2022-03-03'), ('d1', DATE '2022-04-04')", 2);
         assertQuery("SELECT count(*) FROM test_schema.test_table_with_dml", "VALUES 7");
+
+        assertUpdate("CREATE TABLE test_schema.test_table_with_delete (_bigint BIGINT, _date DATE) WITH (partitioning = ARRAY['_date'])");
+        assertUpdate("INSERT INTO test_schema.test_table_with_delete VALUES (0, CAST('2019-09-08' AS DATE)), (1, CAST('2019-09-09' AS DATE)), (2, CAST('2019-09-09' AS DATE))", 3);
+        assertUpdate("INSERT INTO test_schema.test_table_with_delete VALUES (3, CAST('2019-09-09' AS DATE)), (4, CAST('2019-09-10' AS DATE)), (5, CAST('2019-09-10' AS DATE))", 3);
+        assertUpdate("DELETE FROM test_schema.test_table_with_delete WHERE _bigint = 5", 1);
+        assertUpdate("DELETE FROM test_schema.test_table_with_delete WHERE _bigint = 2", 1);
+        assertQuery("SELECT count(*) FROM test_schema.test_table_with_delete", "VALUES 4");
     }
 
     @AfterAll
@@ -103,6 +111,7 @@ public abstract class BaseIcebergSystemTables
         assertUpdate("DROP TABLE IF EXISTS test_schema.test_table_nan");
         assertUpdate("DROP TABLE IF EXISTS test_schema.test_table_with_dml");
         assertUpdate("DROP TABLE IF EXISTS test_schema.test_metadata_log_entries");
+        assertUpdate("DROP TABLE IF EXISTS test_schema.test_table_with_delete");
         assertUpdate("DROP SCHEMA IF EXISTS test_schema");
     }
 
@@ -348,6 +357,14 @@ public abstract class BaseIcebergSystemTables
                         "('split_offsets', 'array(bigint)', '', '')," +
                         "('equality_ids', 'array(integer)', '', '')");
         assertQuerySucceeds("SELECT * FROM test_schema.\"test_table$files\"");
+    }
+
+    @Test
+    public void testFilesTableWithDelete()
+    {
+        assertQuery("SELECT count(*) FROM test_schema.\"test_table_with_delete$files\" WHERE content = " + FileContent.DATA.id(), "VALUES 4");
+        assertQuery("SELECT count(*) FROM test_schema.\"test_table_with_delete$files\" WHERE content = " + FileContent.POSITION_DELETES.id(), "VALUES 2");
+        assertQuery("SELECT count(*) FROM test_schema.\"test_table_with_delete$files\" WHERE content = " + FileContent.EQUALITY_DELETES.id(), "VALUES 0");
     }
 
     private Long nanCount(long value)
