@@ -74,6 +74,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -97,6 +98,7 @@ import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.base.expression.ConnectorExpressions.and;
 import static io.trino.plugin.base.expression.ConnectorExpressions.extractConjuncts;
+import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNewVariables;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_NON_TRANSIENT_ERROR;
 import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.jdbc.JdbcMetadataSessionProperties.isComplexExpressionPushdown;
@@ -308,6 +310,16 @@ public class DefaultJdbcMetadata
 
         JdbcTableHandle handle = (JdbcTableHandle) table;
 
+        Optional<ProjectionApplicationResult<ConnectorTableHandle>> projectionApplicationResult = applyProjectionExpressions(
+                session,
+                handle,
+                projections,
+                assignments);
+
+        if (projectionApplicationResult.isPresent()) {
+            return projectionApplicationResult;
+        }
+
         List<JdbcColumnHandle> newColumns = assignments.values().stream()
                 .map(JdbcColumnHandle.class::cast)
                 .collect(toImmutableList());
@@ -348,6 +360,151 @@ public class DefaultJdbcMetadata
                                 ((JdbcColumnHandle) assignment.getValue()).getColumnType()))
                         .collect(toImmutableList()),
                 precalculateStatisticsForPushdown));
+    }
+
+    private Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjectionExpressions(
+            ConnectorSession session,
+            JdbcTableHandle handle,
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments)
+    {
+        int nextSyntheticColumnId = handle.getNextSyntheticColumnId();
+
+        ImmutableSet.Builder<JdbcColumnHandle> newColumnsBuilder = ImmutableSet.builder();
+        ImmutableList.Builder<Assignment> assignmentBuilder = ImmutableList.builder();
+        ImmutableMap.Builder<ConnectorExpression, Variable> newVariablesBuilder = ImmutableMap.builder();
+        ImmutableMap.Builder<String, ParameterizedExpression> columnExpressionsBuilder = ImmutableMap.builder();
+        Set<ConnectorExpression> translatedExpression = new HashSet<>();
+
+        if (isComplexExpressionPushdown(session)) {
+            for (ConnectorExpression projection : projections) {
+                RewrittenExpression rewrittenExpression = rewriteExpression(session, nextSyntheticColumnId, projection, assignments, translatedExpression);
+                nextSyntheticColumnId = rewrittenExpression.nextSyntheticColumnId;
+                newColumnsBuilder.addAll(rewrittenExpression.columnHandles);
+                assignmentBuilder.addAll(rewrittenExpression.assignments);
+                newVariablesBuilder.putAll(rewrittenExpression.syntheticVariables);
+                columnExpressionsBuilder.putAll(rewrittenExpression.columnExpressions);
+            }
+        }
+
+        List<JdbcColumnHandle> newColumns = ImmutableList.copyOf(newColumnsBuilder.build());
+
+        // Modify projections to refer to new variables
+        Map<ConnectorExpression, Variable> newVariables = newVariablesBuilder.buildOrThrow();
+        List<ConnectorExpression> newProjections = projections.stream()
+                .map(expression -> replaceWithNewVariables(expression, newVariables))
+                .collect(toImmutableList());
+
+        List<Assignment> outputAssignments = assignmentBuilder.build();
+
+        if (!newVariables.isEmpty()) {
+            PreparedQuery preparedQuery = jdbcClient.prepareQuery(session, handle, Optional.empty(), newColumns, columnExpressionsBuilder.buildOrThrow());
+            return Optional.of(new ProjectionApplicationResult<>(
+                    new JdbcTableHandle(
+                            new JdbcQueryRelationHandle(preparedQuery),
+                            TupleDomain.all(),
+                            ImmutableList.of(),
+                            Optional.empty(),
+                            OptionalLong.empty(),
+                            Optional.of(newColumns),
+                            handle.getOtherReferencedTables(),
+                            nextSyntheticColumnId,
+                            handle.getAuthorization(),
+                            handle.getUpdateAssignments()),
+                    newProjections,
+                    outputAssignments,
+                    precalculateStatisticsForPushdown));
+        }
+        return Optional.empty();
+    }
+
+    private RewrittenExpression rewriteExpression(
+            ConnectorSession session,
+            int syntheticColumnId,
+            ConnectorExpression projection,
+            Map<String, ColumnHandle> assignments,
+            Set<ConnectorExpression> translatedExpression)
+    {
+        int nextSyntheticColumnId = syntheticColumnId;
+        // If the expression was translated before skip processing it once again
+        if (translatedExpression.contains(projection)) {
+            return new RewrittenExpression(
+                    nextSyntheticColumnId,
+                    ImmutableMap.of(),
+                    ImmutableMap.of(),
+                    ImmutableSet.of(),
+                    ImmutableList.of());
+        }
+        if (projection instanceof Variable variable) {
+            translatedExpression.add(variable);
+            return new RewrittenExpression(
+                    nextSyntheticColumnId,
+                    ImmutableMap.of(),
+                    ImmutableMap.of(),
+                    ImmutableSet.of((JdbcColumnHandle) assignments.get(variable.getName())),
+                    ImmutableList.of(new Assignment(variable.getName(), assignments.get(variable.getName()), variable.getType())));
+        }
+        Optional<JdbcExpression> convertedExpression = jdbcClient.convertProjection(session, projection, assignments);
+        if (convertedExpression.isPresent()) {
+            String columnName = SYNTHETIC_COLUMN_NAME_PREFIX + nextSyntheticColumnId;
+            JdbcColumnHandle newColumn = JdbcColumnHandle.builder()
+                    .setColumnName(columnName)
+                    .setJdbcTypeHandle(convertedExpression.get().getJdbcTypeHandle())
+                    .setColumnType(projection.getType())
+                    .setComment(Optional.of("synthetic"))
+                    .build();
+            nextSyntheticColumnId++;
+            Variable newVariable = new Variable(newColumn.getColumnName(), newColumn.getColumnType());
+            Assignment newAssignment = new Assignment(columnName, newColumn, projection.getType());
+            translatedExpression.add(projection);
+            return new RewrittenExpression(
+                    nextSyntheticColumnId,
+                    ImmutableMap.of(projection, newVariable),
+                    ImmutableMap.of(columnName, new ParameterizedExpression(convertedExpression.get().getExpression(), convertedExpression.get().getParameters())),
+                    ImmutableSet.of(newColumn),
+                    ImmutableList.of(newAssignment));
+        }
+        // If the parent expression cannot be translated try translating its argument
+        ImmutableSet.Builder<JdbcColumnHandle> columnsBuilder = ImmutableSet.builder();
+        ImmutableList.Builder<Assignment> assignmentBuilder = ImmutableList.builder();
+        ImmutableMap.Builder<ConnectorExpression, Variable> syntheticVariablesBuilder = ImmutableMap.builder();
+        ImmutableMap.Builder<String, ParameterizedExpression> columnExpressionsBuilder = ImmutableMap.builder();
+        for (ConnectorExpression child : projection.getChildren()) {
+            RewrittenExpression rewrittenExpression = rewriteExpression(
+                    session,
+                    nextSyntheticColumnId,
+                    child,
+                    assignments,
+                    translatedExpression);
+            nextSyntheticColumnId = rewrittenExpression.nextSyntheticColumnId;
+            columnsBuilder.addAll(rewrittenExpression.columnHandles);
+            assignmentBuilder.addAll(rewrittenExpression.assignments);
+            syntheticVariablesBuilder.putAll(rewrittenExpression.syntheticVariables);
+            columnExpressionsBuilder.putAll(rewrittenExpression.columnExpressions);
+        }
+
+        return new RewrittenExpression(
+                nextSyntheticColumnId,
+                syntheticVariablesBuilder.buildOrThrow(),
+                columnExpressionsBuilder.buildOrThrow(),
+                columnsBuilder.build(),
+                assignmentBuilder.build());
+    }
+
+    public record RewrittenExpression(
+            int nextSyntheticColumnId,
+            Map<ConnectorExpression, Variable> syntheticVariables,
+            Map<String, ParameterizedExpression> columnExpressions,
+            Set<JdbcColumnHandle> columnHandles,
+            List<Assignment> assignments)
+    {
+        public RewrittenExpression
+        {
+            syntheticVariables = ImmutableMap.copyOf(requireNonNull(syntheticVariables, "syntheticVariables is null"));
+            columnExpressions = ImmutableMap.copyOf(requireNonNull(columnExpressions, "columnExpressions is null"));
+            columnHandles = ImmutableSet.copyOf(requireNonNull(columnHandles, "columnHandles is null"));
+            assignments = ImmutableList.copyOf(requireNonNull(assignments, "assignments is null"));
+        }
     }
 
     @Override

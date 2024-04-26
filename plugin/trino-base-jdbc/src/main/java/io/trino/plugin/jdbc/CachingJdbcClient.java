@@ -229,6 +229,12 @@ public class CachingJdbcClient
     }
 
     @Override
+    public Optional<JdbcExpression> convertProjection(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return delegate.convertProjection(session, expression, assignments);
+    }
+
+    @Override
     public ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle tableHandle)
     {
         return delegate.getSplits(session, tableHandle);
