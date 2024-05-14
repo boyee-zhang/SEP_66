@@ -676,7 +676,8 @@ public class LogicalPlanner
                 viewAnalysis.getTable().toString(),
                 tableHandle,
                 ImmutableList.copyOf(analysis.getTables()),
-                tableFunctions);
+                tableFunctions,
+                viewAnalysis.getTransformationType());
         return getInsertPlan(analysis, viewAnalysis.getTable(), query, tableHandle, viewAnalysis.getColumns(), newTableLayout, Optional.of(writerTarget));
     }
 

@@ -30,6 +30,7 @@ import io.trino.metadata.QualifiedObjectName;
 import io.trino.metadata.TableExecuteHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableLayout;
+import io.trino.spi.QueryTransformationType;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.RowChangeParadigm;
@@ -488,17 +489,20 @@ public class TableWriterNode
         private final TableHandle storageTableHandle;
         private final List<TableHandle> sourceTableHandles;
         private final List<String> sourceTableFunctions;
+        private final QueryTransformationType transformationType;
 
         public RefreshMaterializedViewReference(
                 String table,
                 TableHandle storageTableHandle,
                 List<TableHandle> sourceTableHandles,
-                List<String> sourceTableFunctions)
+                List<String> sourceTableFunctions,
+                QueryTransformationType transformationType)
         {
             this.table = requireNonNull(table, "table is null");
             this.storageTableHandle = requireNonNull(storageTableHandle, "storageTableHandle is null");
             this.sourceTableHandles = ImmutableList.copyOf(sourceTableHandles);
             this.sourceTableFunctions = ImmutableList.copyOf(sourceTableFunctions);
+            this.transformationType = transformationType;
         }
 
         public TableHandle getStorageTableHandle()
@@ -540,6 +544,11 @@ public class TableWriterNode
         public WriterScalingOptions getWriterScalingOptions(Metadata metadata, Session session)
         {
             return metadata.getInsertWriterScalingOptions(session, storageTableHandle);
+        }
+
+        public QueryTransformationType getTransformationType()
+        {
+            return transformationType;
         }
     }
 

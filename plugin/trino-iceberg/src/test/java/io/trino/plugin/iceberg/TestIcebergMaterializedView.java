@@ -102,10 +102,6 @@ public class TestIcebergMaterializedView
         assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
         assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_2 AS %s".formatted(matViewDef));
 
-        // check MV props
-        Map<String, String> matViewProps = getStorageTableMetadata("mat_view_test_1").properties();
-        assertThat(matViewProps).containsOnlyKeys("write.format.default", "write.parquet.compression-codec");
-
         // execute first refresh: afterwards both MVs will contain: (1, 'abc'), (2, 'def')
         assertUpdate("REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
         assertUpdate("REFRESH MATERIALIZED VIEW mat_view_test_2", 2);
@@ -138,14 +134,6 @@ public class TestIcebergMaterializedView
         assertUpdate("INSERT INTO source_table VALUES (1, 'abc'), (2, 'def')", 2);
         assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
 
-        // check MV props
-        Map<String, String> matViewProps = getStorageTableMetadata("mat_view_test_1").properties();
-        assertThat(matViewProps).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "write.format.default", "PARQUET",
-                "write.parquet.compression-codec", "zstd",
-                "materialized-view.incremental-refresh.contains-group-by", "true",
-                "materialized-view.incremental-refresh.contains-select-function", "true"));
-
         // execute first refresh: afterwards MV will contain: ('abc', 1), ('def', 2)
         assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
 
@@ -176,13 +164,6 @@ public class TestIcebergMaterializedView
         assertUpdate("INSERT INTO customer VALUES (1, 'Mike'), (2, 'Lakshmi')", 2);
         assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
 
-        // check MV props
-        Map<String, String> matViewProps = getStorageTableMetadata("mat_view_test_1").properties();
-        assertThat(matViewProps).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "write.format.default", "PARQUET",
-                "write.parquet.compression-codec", "zstd",
-                "materialized-view.incremental-refresh.contains-join", "true"));
-
         // execute first refresh: afterwards MV will contain: (1, 1500), (1, 3000), (2, 4000)
         assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
 
@@ -196,6 +177,96 @@ public class TestIcebergMaterializedView
         assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
         assertUpdate("DROP TABLE orders");
         assertUpdate("DROP TABLE customer");
+    }
+
+    @Test
+    public void testIncrementalRefreshDisabledForWhereSubQuery()
+    {
+        Session incrRefreshEnabled = Session.builder(getSession())
+                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
+                .build();
+
+        String matViewDef = "SELECT custkey, price FROM orders WHERE custkey IN (SELECT custkey FROM customer WHERE name LIKE '%Mi%')";
+
+        // create source table and MV
+        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
+        assertUpdate("CREATE TABLE customer (custkey int, name varchar)");
+        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 2, 4000, 'Flight ticket')", 3);
+        assertUpdate("INSERT INTO customer VALUES (1, 'Mike'), (2, 'Lakshmi')", 2);
+        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
+
+        // execute first refresh: afterwards MV will contain: (1, 1500), (1, 3000)
+        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
+
+        // add some new rows to source
+        assertUpdate("INSERT INTO orders VALUES (4, 1, 2000, 'Napkins'), (5, 2, 5500, 'Sunscreen')", 2);
+
+        // will perform full refresh: (1, 1500), (1, 3000), (1, 2000)
+        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
+
+        // cleanup
+        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
+        assertUpdate("DROP TABLE orders");
+        assertUpdate("DROP TABLE customer");
+    }
+
+    @Test
+    public void testIncrementalRefreshDisabledForTableSubQuery()
+    {
+        Session incrRefreshEnabled = Session.builder(getSession())
+                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
+                .build();
+
+        String matViewDef = "SELECT custkey FROM (SELECT c.custkey as custkey, o.price FROM orders o JOIN customer c ON o.custkey = c.custkey)";
+
+        // create source table and MV
+        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
+        assertUpdate("CREATE TABLE customer (custkey int, name varchar)");
+        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 2, 4000, 'Flight ticket')", 3);
+        assertUpdate("INSERT INTO customer VALUES (1, 'Mike'), (2, 'Lakshmi')", 2);
+        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
+
+        // execute first refresh: afterwards MV will contain: (1), (1), (2)
+        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
+
+        // add some new rows to source
+        assertUpdate("INSERT INTO orders VALUES (4, 1, 2000, 'Napkins'), (5, 2, 5500, 'Sunscreen')", 2);
+
+        // will perform full refresh: (1), (1), (2), (1), (2)
+        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 5);
+
+        // cleanup
+        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
+        assertUpdate("DROP TABLE orders");
+        assertUpdate("DROP TABLE customer");
+    }
+
+    @Test
+    public void testIncrementalRefreshDisabledForSelectDistinct()
+    {
+        Session incrRefreshEnabled = Session.builder(getSession())
+                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
+                .build();
+
+        String matViewDef = "SELECT distinct itemname FROM orders";
+
+        // create source table and MV
+        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
+        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 3, 4000, 'Flight ticket')", 3);
+        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
+
+        // execute first refresh: afterwards MV will contain: ('Microwave'), ('Desk lamp'), ('Flight ticket')
+        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
+
+        // add some new rows to source
+        assertUpdate("INSERT INTO orders VALUES (4, 3, 5000, 'Microwave'), (5, 2, 5500, 'Sunscreen')", 2);
+
+        // will perform full refresh: ('Microwave'), ('Desk lamp'), ('Flight ticket'), ('Sunscreen')
+        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 4);
+
+        // cleanup
+        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
+        assertUpdate("DROP TABLE orders");
     }
 
     @Test

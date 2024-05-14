@@ -58,6 +58,7 @@ import io.trino.security.AllowAllAccessControl;
 import io.trino.security.InjectedConnectorAccessControl;
 import io.trino.security.SecurityContext;
 import io.trino.security.ViewAccessControl;
+import io.trino.spi.QueryTransformationType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoWarning;
 import io.trino.spi.connector.CatalogHandle;
@@ -730,7 +731,8 @@ class StatementAnalyzer
             analysis.setRefreshMaterializedView(new Analysis.RefreshMaterializedViewAnalysis(
                     refreshMaterializedView.getTable(),
                     targetTableHandle, query,
-                    insertColumns.stream().map(columnHandles::get).collect(toImmutableList())));
+                    insertColumns.stream().map(columnHandles::get).collect(toImmutableList()),
+                    getQueryTransformationType(query)));
 
             List<Type> tableTypes = insertColumns.stream()
                     .map(insertColumn -> tableMetadata.column(insertColumn).getType())
@@ -5917,6 +5919,35 @@ class StatementAnalyzer
             InterpretedFunctionInvoker functionInvoker = new InterpretedFunctionInvoker(plannerContext.getFunctionManager());
             return functionInvoker.invoke(coercion, session.toConnectorSession(), value);
         }
+    }
+
+    private static QueryTransformationType getQueryTransformationType(Query query)
+    {
+        if (query.getQueryBody() instanceof QuerySpecification querySpecification) {
+            if (!querySpecification.getWindows().isEmpty()
+                    || querySpecification.getFrom().filter(from -> !(from instanceof Table)).isPresent()
+                    || querySpecification.getSelect().isDistinct()
+                    || querySpecification.getWhere().filter(w -> w.getChildren().stream().anyMatch(ch -> ch instanceof SubqueryExpression)).isPresent()) {
+                return QueryTransformationType.OTHER;
+            }
+            else if (querySpecification.getGroupBy().isEmpty() && getSelectFunctionNames(querySpecification).isEmpty()) {
+                return QueryTransformationType.LINEAR_PROJECTION;
+            }
+            else if (querySpecification.getGroupBy().isPresent() && getSelectFunctionNames(querySpecification).stream()
+                        .allMatch(fnName -> fnName != null && (fnName.toString().equals("sum") || fnName.toString().equals("count")))) {
+                return QueryTransformationType.INCREMENTABLE_AGGREGATION;
+            }
+        }
+        return QueryTransformationType.OTHER;
+    }
+
+    private static List<QualifiedName> getSelectFunctionNames(QuerySpecification querySpecification)
+    {
+        return querySpecification.getSelect().getSelectItems().stream()
+                .filter(child -> child instanceof SingleColumn)
+                .filter(child -> ((SingleColumn) child).getExpression() instanceof FunctionCall)
+                .map(child -> ((FunctionCall) ((SingleColumn) child).getExpression()).getName())
+                .collect(Collectors.toList());
     }
 
     private static boolean hasScopeAsLocalParent(Scope root, Scope parent)

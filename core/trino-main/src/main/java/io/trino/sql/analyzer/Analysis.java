@@ -34,6 +34,7 @@ import io.trino.metadata.TableLayout;
 import io.trino.security.AccessControl;
 import io.trino.security.SecurityContext;
 import io.trino.spi.QueryId;
+import io.trino.spi.QueryTransformationType;
 import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.CatalogHandle.CatalogVersion;
 import io.trino.spi.connector.ColumnHandle;
@@ -1522,13 +1523,15 @@ public class Analysis
         private final TableHandle target;
         private final Query query;
         private final List<ColumnHandle> columns;
+        private final QueryTransformationType transformationType;
 
-        public RefreshMaterializedViewAnalysis(Table table, TableHandle target, Query query, List<ColumnHandle> columns)
+        public RefreshMaterializedViewAnalysis(Table table, TableHandle target, Query query, List<ColumnHandle> columns, QueryTransformationType transformationType)
         {
             this.table = requireNonNull(table, "table is null");
             this.target = requireNonNull(target, "target is null");
             this.query = query;
             this.columns = requireNonNull(columns, "columns is null");
+            this.transformationType = transformationType;
             checkArgument(columns.size() > 0, "No columns given to refresh materialized view");
         }
 
@@ -1550,6 +1553,11 @@ public class Analysis
         public Table getTable()
         {
             return table;
+        }
+
+        public QueryTransformationType getTransformationType()
+        {
+            return transformationType;
         }
     }
 

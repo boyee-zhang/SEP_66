@@ -50,6 +50,7 @@ import io.trino.plugin.iceberg.procedure.IcebergTableExecuteHandle;
 import io.trino.plugin.iceberg.procedure.IcebergTableProcedureId;
 import io.trino.plugin.iceberg.util.DataFileWithDeleteFiles;
 import io.trino.spi.ErrorCode;
+import io.trino.spi.QueryTransformationType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.Assignment;
@@ -2896,53 +2897,35 @@ public class IcebergMetadata
     }
 
     @Override
-    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode)
+    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, QueryTransformationType transformationType)
     {
         IcebergTableHandle table = (IcebergTableHandle) tableHandle;
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
         beginTransaction(icebergTable);
 
-        fromSnapshotsForRefresh = getFromSnapshotsForIncrementalRefresh(session, sourceTableHandles, icebergTable);
-
-        return newWritableTableHandle(table.getSchemaTableName(), icebergTable, retryMode);
-    }
-
-    private Map<SchemaTableName, Long> getFromSnapshotsForIncrementalRefresh(ConnectorSession session, List<ConnectorTableHandle> sourceTableHandles, Table icebergTable)
-    {
-        Map<SchemaTableName, Long> fromSnapshotsForRefresh = new HashMap<>();
-        if (!isIncrementalRefreshEnabled(session)) {
-            return fromSnapshotsForRefresh;
-        }
-
-        if (sourceTableHandles.stream().anyMatch(t -> !(t instanceof IcebergTableHandle))) {
-            // Incremental refresh is only supported when all backing tables are Iceberg tables
-            return fromSnapshotsForRefresh;
-        }
-
+        fromSnapshotsForRefresh = new HashMap<>();
         Optional<String> dependencies = Optional.ofNullable(icebergTable.currentSnapshot())
                 .map(Snapshot::summary)
                 .map(summary -> summary.get(DEPENDS_ON_TABLES));
-        if (dependencies.isEmpty() || dependencies.get().equals(UNKNOWN_SNAPSHOT_TOKEN)) {
-            return fromSnapshotsForRefresh;
+
+        boolean shouldUseIncremental = isIncrementalRefreshEnabled(session)
+                //  Incremental refresh is only supported for linear projection queries
+                && transformationType == QueryTransformationType.LINEAR_PROJECTION
+                // and when all backing tables are Iceberg tables
+                && sourceTableHandles.stream().allMatch(t -> t instanceof IcebergTableHandle)
+                // and the fromSnapshots are available for the source tables
+                && dependencies.isPresent() && !dependencies.get().equals(UNKNOWN_SNAPSHOT_TOKEN);
+
+        if (shouldUseIncremental) {
+            Map<String, String> baseTableToSnapshot = MAP_SPLITTER.split(dependencies.get());
+            for (Map.Entry<String, String> baseTable : baseTableToSnapshot.entrySet()) {
+                String[] schemaTable = baseTable.getKey().split("\\.");
+                long snapshot = Long.parseLong(baseTable.getValue());
+                fromSnapshotsForRefresh.put(new SchemaTableName(schemaTable[0], schemaTable[1]), snapshot);
+            }
         }
 
-        boolean useIncrementalRefresh = !Boolean.parseBoolean(icebergTable.properties().get("materialized-view.incremental-refresh.contains-group-by"))
-                && !Boolean.parseBoolean(icebergTable.properties().get("materialized-view.incremental-refresh.contains-join"))
-                && !Boolean.parseBoolean(icebergTable.properties().get("materialized-view.incremental-refresh.contains-window"))
-                && !Boolean.parseBoolean(icebergTable.properties().get("materialized-view.incremental-refresh.contains-distinct"))
-                && !Boolean.parseBoolean(icebergTable.properties().get("materialized-view.incremental-refresh.contains-select-function"))
-                && !Boolean.parseBoolean(icebergTable.properties().get("materialized-view.incremental-refresh.contains-predicate-function"));
-        if (!useIncrementalRefresh) {
-            return fromSnapshotsForRefresh;
-        }
-
-        Map<String, String> baseTableToSnapshot = MAP_SPLITTER.split(dependencies.get());
-        for (Map.Entry<String, String> baseTable : baseTableToSnapshot.entrySet()) {
-            String[] schemaTable = baseTable.getKey().split("\\.");
-            long snapshot = Long.parseLong(baseTable.getValue());
-            fromSnapshotsForRefresh.put(new SchemaTableName(schemaTable[0], schemaTable[1]), snapshot);
-        }
-        return fromSnapshotsForRefresh;
+        return newWritableTableHandle(table.getSchemaTableName(), icebergTable, retryMode);
     }
 
     @Override
