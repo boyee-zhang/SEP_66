@@ -25,6 +25,7 @@ import io.opentelemetry.api.trace.Tracer;
 import io.trino.FeaturesConfig;
 import io.trino.Session;
 import io.trino.SystemSessionProperties;
+import io.trino.cache.CacheMetadata;
 import io.trino.client.NodeVersion;
 import io.trino.connector.CatalogFactory;
 import io.trino.connector.CatalogServiceProviderModule;
@@ -217,6 +218,7 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.tracing.Tracing.noopTracer;
 import static io.trino.connector.CatalogServiceProviderModule.createAccessControlProvider;
 import static io.trino.connector.CatalogServiceProviderModule.createAnalyzePropertyManager;
+import static io.trino.connector.CatalogServiceProviderModule.createCacheMetadata;
 import static io.trino.connector.CatalogServiceProviderModule.createColumnPropertyManager;
 import static io.trino.connector.CatalogServiceProviderModule.createFunctionProvider;
 import static io.trino.connector.CatalogServiceProviderModule.createIndexProvider;
@@ -400,7 +402,8 @@ public class PlanTester
                 new JsonValueFunction(functionManager, metadata, typeManager),
                 new JsonQueryFunction(functionManager, metadata, typeManager)));
 
-        this.plannerContext = new PlannerContext(metadata, typeOperators, blockEncodingSerde, typeManager, functionManager, languageFunctionManager, tracer);
+        CacheMetadata cacheMetadata = new CacheMetadata(createCacheMetadata(catalogManager));
+        this.plannerContext = new PlannerContext(metadata, cacheMetadata, typeOperators, blockEncodingSerde, typeManager, functionManager, languageFunctionManager, tracer);
         this.pageFunctionCompiler = new PageFunctionCompiler(functionManager, 0);
         this.expressionCompiler = new ExpressionCompiler(functionManager, pageFunctionCompiler);
         this.joinFilterFunctionCompiler = new JoinFilterFunctionCompiler(functionManager);
@@ -533,6 +536,11 @@ public class PlanTester
     public PlannerContext getPlannerContext()
     {
         return plannerContext;
+    }
+
+    public CacheMetadata getCacheMetadata()
+    {
+        return plannerContext.getCacheMetadata();
     }
 
     public TablePropertyManager getTablePropertyManager()
