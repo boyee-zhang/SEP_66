@@ -40,8 +40,11 @@ public abstract class BaseMariaDbConnectorTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         return switch (connectorBehavior) {
-            case SUPPORTS_JOIN_PUSHDOWN -> true;
+            case SUPPORTS_JOIN_PUSHDOWN,
+                 SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN -> true;
             case SUPPORTS_ADD_COLUMN_WITH_COMMENT,
+                    SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN_WITH_LIKE,
+                    SUPPORTS_PREDICATE_ARITHMETIC_EXPRESSION_PUSHDOWN,
                     SUPPORTS_AGGREGATION_PUSHDOWN_CORRELATION,
                     SUPPORTS_AGGREGATION_PUSHDOWN_COUNT_DISTINCT,
                     SUPPORTS_AGGREGATION_PUSHDOWN_COVARIANCE,
@@ -89,6 +92,30 @@ public abstract class BaseMariaDbConnectorTest
     public void testShowColumns()
     {
         assertThat(query("SHOW COLUMNS FROM orders")).result().matches(getDescribeOrdersResult());
+    }
+
+    @Test
+    @Override
+    public void testComplexExpressionOnApproximateNumericPredicatePushdown()
+    {
+        assertThat(query("SELECT orderkey FROM orders WHERE totalprice > 10 OR shippriority = 0")).isFullyPushedDown();
+
+        try (TestTable testTable = new TestTable(
+                getQueryRunner()::execute,
+                "test_complex_expression_pushdown_",
+                "AS SELECT 1 as a_int, DOUBLE '3.14' as a_double, DOUBLE '1.9891e30' as a_double_2")) {
+            assertThat(query("SELECT a_int FROM " + testTable.getName() + " WHERE a_double > DOUBLE '3.12' OR a_double_2 >  DOUBLE '1.9890e30'"))
+                    .isFullyPushedDown();
+
+            assertThat(query("SELECT a_int FROM " + testTable.getName() + " WHERE a_double > DOUBLE '3.12' OR a_double_2 < infinity()"))
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            assertThat(query("SELECT a_int FROM " + testTable.getName() + " WHERE a_double < infinity() OR a_double_2 > DOUBLE '1.9890e30'"))
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            assertThat(query("SELECT a_int FROM " + testTable.getName() + " WHERE a_double > DOUBLE '3.12' OR a_double_2 <> nan()"))
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
     }
 
     @Override
