@@ -58,7 +58,7 @@ import io.trino.security.AllowAllAccessControl;
 import io.trino.security.InjectedConnectorAccessControl;
 import io.trino.security.SecurityContext;
 import io.trino.security.ViewAccessControl;
-import io.trino.spi.QueryTransformationType;
+import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoWarning;
 import io.trino.spi.connector.CatalogHandle;
@@ -732,7 +732,7 @@ class StatementAnalyzer
                     refreshMaterializedView.getTable(),
                     targetTableHandle, query,
                     insertColumns.stream().map(columnHandles::get).collect(toImmutableList()),
-                    getQueryTransformationType(query)));
+                    getRefreshType(query)));
 
             List<Type> tableTypes = insertColumns.stream()
                     .map(insertColumn -> tableMetadata.column(insertColumn).getType())
@@ -5921,24 +5921,19 @@ class StatementAnalyzer
         }
     }
 
-    private static QueryTransformationType getQueryTransformationType(Query query)
+    private static RefreshType getRefreshType(Query query)
     {
         if (query.getQueryBody() instanceof QuerySpecification querySpecification) {
-            if (!querySpecification.getWindows().isEmpty()
-                    || querySpecification.getFrom().filter(from -> !(from instanceof Table)).isPresent()
-                    || querySpecification.getSelect().isDistinct()
-                    || querySpecification.getWhere().filter(w -> w.getChildren().stream().anyMatch(ch -> ch instanceof SubqueryExpression)).isPresent()) {
-                return QueryTransformationType.OTHER;
-            }
-            else if (querySpecification.getGroupBy().isEmpty() && getSelectFunctionNames(querySpecification).isEmpty()) {
-                return QueryTransformationType.LINEAR_PROJECTION;
-            }
-            else if (querySpecification.getGroupBy().isPresent() && getSelectFunctionNames(querySpecification).stream()
-                        .allMatch(fnName -> fnName != null && (fnName.toString().equals("sum") || fnName.toString().equals("count")))) {
-                return QueryTransformationType.INCREMENTABLE_AGGREGATION;
+            if (querySpecification.getGroupBy().isEmpty()
+                    && querySpecification.getWindows().isEmpty()
+                    && querySpecification.getFrom().stream().allMatch(from -> from instanceof Table)
+                    && !querySpecification.getSelect().isDistinct()
+                    && getSelectFunctionNames(querySpecification).isEmpty()
+                    && querySpecification.getWhere().filter(w -> w.getChildren().stream().anyMatch(ch -> ch instanceof SubqueryExpression)).isEmpty()) {
+                return RefreshType.INCREMENTAL;
             }
         }
-        return QueryTransformationType.OTHER;
+        return RefreshType.FULL;
     }
 
     private static List<QualifiedName> getSelectFunctionNames(QuerySpecification querySpecification)

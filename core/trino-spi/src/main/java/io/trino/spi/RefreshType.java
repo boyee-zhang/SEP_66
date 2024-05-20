@@ -14,10 +14,7 @@
 
 package io.trino.spi;
 
-public enum QueryTransformationType {
-    // only SELECT and WHERE (single table)
-    LINEAR_PROJECTION,
-    // e.g. SELECT col, sum(), count() ... GROUP BY col (single table)
-    INCREMENTABLE_AGGREGATION,
-    OTHER
+public enum RefreshType {
+    INCREMENTAL,
+    FULL
 }

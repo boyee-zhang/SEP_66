@@ -50,7 +50,7 @@ import io.trino.plugin.iceberg.procedure.IcebergTableExecuteHandle;
 import io.trino.plugin.iceberg.procedure.IcebergTableProcedureId;
 import io.trino.plugin.iceberg.util.DataFileWithDeleteFiles;
 import io.trino.spi.ErrorCode;
-import io.trino.spi.QueryTransformationType;
+import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.Assignment;
@@ -341,7 +341,7 @@ public class IcebergMetadata
     private final Map<IcebergTableHandle, TableStatistics> tableStatisticsCache = new ConcurrentHashMap<>();
 
     private Transaction transaction;
-    private Map<SchemaTableName, Long> fromSnapshotsForRefresh = new HashMap<>();
+    private Optional<Map<SchemaTableName, Long>> fromSnapshotsForRefresh = Optional.empty();
 
     public IcebergMetadata(
             TypeManager typeManager,
@@ -2897,20 +2897,19 @@ public class IcebergMetadata
     }
 
     @Override
-    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, QueryTransformationType transformationType)
+    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, RefreshType refreshType)
     {
         IcebergTableHandle table = (IcebergTableHandle) tableHandle;
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
         beginTransaction(icebergTable);
 
-        fromSnapshotsForRefresh = new HashMap<>();
+        fromSnapshotsForRefresh = Optional.of(new HashMap<>());
         Optional<String> dependencies = Optional.ofNullable(icebergTable.currentSnapshot())
                 .map(Snapshot::summary)
                 .map(summary -> summary.get(DEPENDS_ON_TABLES));
 
         boolean shouldUseIncremental = isIncrementalRefreshEnabled(session)
-                //  Incremental refresh is only supported for linear projection queries
-                && transformationType == QueryTransformationType.LINEAR_PROJECTION
+                && refreshType == RefreshType.INCREMENTAL
                 // and when all backing tables are Iceberg tables
                 && sourceTableHandles.stream().allMatch(t -> t instanceof IcebergTableHandle)
                 // and the fromSnapshots are available for the source tables
@@ -2921,7 +2920,7 @@ public class IcebergMetadata
             for (Map.Entry<String, String> baseTable : baseTableToSnapshot.entrySet()) {
                 String[] schemaTable = baseTable.getKey().split("\\.");
                 long snapshot = Long.parseLong(baseTable.getValue());
-                fromSnapshotsForRefresh.put(new SchemaTableName(schemaTable[0], schemaTable[1]), snapshot);
+                fromSnapshotsForRefresh.get().put(new SchemaTableName(schemaTable[0], schemaTable[1]), snapshot);
             }
         }
 
@@ -2941,7 +2940,7 @@ public class IcebergMetadata
         IcebergWritableTableHandle table = (IcebergWritableTableHandle) insertHandle;
 
         Table icebergTable = transaction.table();
-        boolean isFullRefresh = fromSnapshotsForRefresh.isEmpty();
+        boolean isFullRefresh = fromSnapshotsForRefresh.isEmpty() || fromSnapshotsForRefresh.get().isEmpty();
         if (isFullRefresh) {
             // delete before insert .. simulating overwrite
             log.info("Performing full MV refresh for storage table: %s", table.getName());
@@ -3009,6 +3008,7 @@ public class IcebergMetadata
 
         transaction.commitTransaction();
         transaction = null;
+        fromSnapshotsForRefresh = Optional.empty();
         return Optional.of(new HiveWrittenPartitions(commitTasks.stream()
                 .map(CommitTaskData::path)
                 .collect(toImmutableList())));
@@ -3220,12 +3220,12 @@ public class IcebergMetadata
 
     public Optional<Long> getIncrementalRefreshFromSnapshot(SchemaTableName schemaTableName)
     {
-        return Optional.ofNullable(fromSnapshotsForRefresh.get(schemaTableName));
+        return fromSnapshotsForRefresh.map(map -> map.get(schemaTableName));
     }
 
     public void disableIncrementalRefresh()
     {
-        fromSnapshotsForRefresh.clear();
+        fromSnapshotsForRefresh.ifPresent(Map::clear);
     }
 
     private static CollectedStatistics processComputedTableStatistics(Table table, Collection<ComputedStatistics> computedStatistics)

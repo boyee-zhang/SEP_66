@@ -16,7 +16,7 @@ package io.trino.spi.connector;
 import io.airlift.slice.Slice;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.Experimental;
-import io.trino.spi.QueryTransformationType;
+import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
@@ -867,7 +867,7 @@ public interface ConnectorMetadata
      * </pre>
      * unless {@code retryMode} is set to {@code NO_RETRIES}.
      */
-    default ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, QueryTransformationType transformationType)
+    default ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, RefreshType refreshType)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support materialized views");
     }

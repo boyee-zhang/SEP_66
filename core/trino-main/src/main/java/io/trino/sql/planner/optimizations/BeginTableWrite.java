@@ -256,7 +256,7 @@ public class BeginTableWrite
             if (target instanceof TableWriterNode.RefreshMaterializedViewReference refreshMV) {
                 return new TableWriterNode.RefreshMaterializedViewTarget(
                         refreshMV.getStorageTableHandle(),
-                        metadata.beginRefreshMaterializedView(session, refreshMV.getStorageTableHandle(), refreshMV.getSourceTableHandles(), refreshMV.getTransformationType()),
+                        metadata.beginRefreshMaterializedView(session, refreshMV.getStorageTableHandle(), refreshMV.getSourceTableHandles(), refreshMV.getRefreshType()),
                         metadata.getTableName(session, refreshMV.getStorageTableHandle()).getSchemaTableName(),
                         refreshMV.getSourceTableHandles(),
                         refreshMV.getSourceTableFunctions(),
