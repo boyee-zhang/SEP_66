@@ -49,9 +49,12 @@ import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.SortItem;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.connector.SortingProperty;
 import io.trino.spi.connector.TableFunctionApplicationResult;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
@@ -71,6 +74,8 @@ import io.trino.spi.type.VarcharType;
 import org.bson.Document;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -617,9 +622,97 @@ public class MongoMetadata
                         handle.filter(),
                         handle.constraint(),
                         handle.projectedColumns(),
-                        OptionalInt.of(toIntExact(limit))),
+                        OptionalInt.of(toIntExact(limit)),
+                        handle.sortItems()),
                 true,
                 false));
+    }
+
+    @Override
+    public Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(ConnectorSession session, ConnectorTableHandle table, long topNCount, List<SortItem> sortItems, Map<String, ColumnHandle> assignments)
+    {
+        MongoTableHandle handle = (MongoTableHandle) table;
+
+        // topNCount is analogous to limit
+
+        if (topNCount == 0) {
+            return Optional.empty();
+        }
+
+        if (topNCount > Integer.MAX_VALUE) {
+            return Optional.empty();
+        }
+
+        if (handle.limit().isPresent() && handle.limit().getAsInt() <= topNCount) {
+            return Optional.empty();
+        }
+
+        if (sortItems.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // MongoDB supports a maximum of 32 fields in it's cursor.sort() method (backed by $sort operator)
+        // see, https://www.mongodb.com/docs/manual/reference/method/cursor.sort/#limits
+        if (sortItems.size() > 32) {
+            return Optional.empty();
+        }
+
+        log.info("MongoDB: applyTopN with the following sortItems");
+
+        // MongoDB allows a column/field to take a value of any type across documents.
+        // Hence, it's sort order factors in this type information as well.
+        // null is valued less than any other type and so on
+        // see, https://www.mongodb.com/docs/manual/reference/method/cursor.sort/#ascending-descending-sort
+        // For now, we only support ASC_NULLS_FIRST and DESC_NULLS_LAST, as these are implemented in MongoDB by default
+        for (SortItem si : sortItems) {
+            log.info(si.toString());
+            if (si.getSortOrder() == SortOrder.ASC_NULLS_LAST) {
+                return Optional.empty();
+            }
+            else if (si.getSortOrder() == SortOrder.DESC_NULLS_FIRST) {
+                return Optional.empty();
+            }
+        }
+
+        List<SortItem> sortItemsWithMongoColumnNames = new ArrayList<>();
+
+        for (SortItem si : sortItems) {
+            SortItem sortItemWithMongoColumnName = new SortItem(mongoColumnName(si.getName()), si.getSortOrder());
+            sortItemsWithMongoColumnNames.add(sortItemWithMongoColumnName);
+            log.info(sortItemWithMongoColumnName.toString());
+        }
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                handle.schemaTableName(),
+                handle.remoteTableName(),
+                handle.filter(),
+                handle.constraint(),
+                handle.projectedColumns(),
+                OptionalInt.of(toIntExact(topNCount)),
+                sortItemsWithMongoColumnNames);
+
+        return Optional.of(new TopNApplicationResult<>(
+                tableHandle,
+                true,
+                false));
+    }
+
+    private static String mongoColumnName(String trinoColumnName)
+    {
+        String[] trinoColumnSegments = trinoColumnName.split("_");
+        trinoColumnSegments = Arrays.stream(trinoColumnSegments).filter(s -> !isNumeric(s)).toArray(String[]::new);
+        return String.join(".", trinoColumnSegments);
+    }
+
+    private static boolean isNumeric(String s)
+    {
+        try {
+            Integer.parseInt(s);
+            return true;
+        }
+        catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     @Override
@@ -665,7 +758,8 @@ public class MongoMetadata
                 handle.filter(),
                 newDomain,
                 handle.projectedColumns(),
-                handle.limit());
+                handle.limit(),
+                handle.sortItems());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, remainingFilter, constraint.getExpression(), false));
     }

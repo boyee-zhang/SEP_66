@@ -125,7 +125,8 @@ public class TestMongoTableHandle
                 Optional.empty(),
                 TupleDomain.all(),
                 projectedColumns,
-                OptionalInt.empty());
+                OptionalInt.empty(),
+                ImmutableList.of());
 
         String json = codec.toJson(expected);
         MongoTableHandle actual = codec.fromJson(json);
