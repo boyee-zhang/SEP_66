@@ -502,7 +502,7 @@ public class TableWriterNode
             this.storageTableHandle = requireNonNull(storageTableHandle, "storageTableHandle is null");
             this.sourceTableHandles = ImmutableList.copyOf(sourceTableHandles);
             this.sourceTableFunctions = ImmutableList.copyOf(sourceTableFunctions);
-            this.refreshType = refreshType;
+            this.refreshType = requireNonNull(refreshType, "refreshType is null");
         }
 
         public TableHandle getStorageTableHandle()
@@ -549,6 +549,11 @@ public class TableWriterNode
         public RefreshType getRefreshType()
         {
             return refreshType;
+        }
+
+        public RefreshMaterializedViewReference withRefreshType(RefreshType refreshType)
+        {
+            return new RefreshMaterializedViewReference(table, storageTableHandle, sourceTableHandles, sourceTableFunctions, refreshType);
         }
     }
 

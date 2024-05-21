@@ -747,14 +747,6 @@ public final class IcebergUtil
         return propertiesBuilder.buildOrThrow();
     }
 
-    private static void setBooleanProp(ConnectorTableMetadata tableMetadata, ImmutableMap.Builder<String, String> propertiesBuilder, String propertyName)
-    {
-        Object prop = tableMetadata.getProperties().get(propertyName);
-        if (prop instanceof String) {
-            propertiesBuilder.put(propertyName, (String) prop);
-        }
-    }
-
     /**
      * Find the first snapshot in the table. First snapshot is the last snapshot
      * in snapshot parents chain starting at {@link Table#currentSnapshot()}.

@@ -44,6 +44,7 @@ import io.trino.metadata.TableLayout;
 import io.trino.metadata.TableMetadata;
 import io.trino.operator.RetryPolicy;
 import io.trino.spi.ErrorCodeSupplier;
+import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ColumnHandle;
@@ -71,13 +72,18 @@ import io.trino.sql.ir.Row;
 import io.trino.sql.planner.StatisticsAggregationPlanner.TableStatisticAggregation;
 import io.trino.sql.planner.iterative.IterativeOptimizer;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
+import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.Assignments;
+import io.trino.sql.planner.plan.CorrelatedJoinNode;
 import io.trino.sql.planner.plan.ExplainAnalyzeNode;
 import io.trino.sql.planner.plan.FilterNode;
+import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PlanNode;
+import io.trino.sql.planner.plan.PlanVisitor;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.RefreshMaterializedViewNode;
 import io.trino.sql.planner.plan.SimpleTableExecuteNode;
@@ -88,6 +94,7 @@ import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.ValuesNode;
+import io.trino.sql.planner.plan.WindowNode;
 import io.trino.sql.planner.planprinter.PlanPrinter;
 import io.trino.sql.planner.sanity.PlanSanityChecker;
 import io.trino.sql.tree.Analyze;
@@ -591,11 +598,16 @@ public class LogicalPlanner
         TableStatisticsMetadata statisticsMetadata = metadata.getStatisticsCollectionMetadataForWrite(session, tableHandle.catalogHandle(), tableMetadata.metadata());
 
         if (materializedViewRefreshWriterTarget.isPresent()) {
+            WriterTarget writerTarget = materializedViewRefreshWriterTarget.get();
+            if (materializedViewRefreshWriterTarget.get() instanceof TableWriterNode.RefreshMaterializedViewReference matViewRef) {
+                RefreshType refreshType = canIncrementallyRefresh(plan);
+                writerTarget = matViewRef.withRefreshType(refreshType);
+            }
             return createTableWriterPlan(
                     analysis,
                     plan.getRoot(),
                     plan.getFieldMappings(),
-                    materializedViewRefreshWriterTarget.get(),
+                    writerTarget,
                     insertedTableColumnNames,
                     newTableLayout,
                     statisticsMetadata);
@@ -613,6 +625,32 @@ public class LogicalPlanner
                 insertedTableColumnNames,
                 newTableLayout,
                 statisticsMetadata);
+    }
+
+    private RefreshType canIncrementallyRefresh(RelationPlan plan)
+    {
+        return new IncrementalRefreshVisitor().visitPlan(plan.getRoot(), null);
+    }
+
+    static class IncrementalRefreshVisitor
+            extends PlanVisitor<RefreshType, Void>
+    {
+        @Override
+        protected RefreshType visitPlan(PlanNode node, Void context)
+        {
+            if (node instanceof AggregationNode
+                    || node instanceof JoinNode
+                    || node instanceof CorrelatedJoinNode
+                    || node instanceof LimitNode
+                    || node instanceof WindowNode
+                    || node instanceof ApplyNode) {
+                return RefreshType.FULL;
+            }
+            for (PlanNode source : node.getSources()) {
+                return source.accept(this, context);
+            }
+            return RefreshType.INCREMENTAL;
+        }
     }
 
     private Expression coerceOrCastToTableType(Symbol fieldMapping, Type tableType, Type queryType)
@@ -677,7 +715,7 @@ public class LogicalPlanner
                 tableHandle,
                 ImmutableList.copyOf(analysis.getTables()),
                 tableFunctions,
-                viewAnalysis.getRefreshType());
+                RefreshType.FULL);
         return getInsertPlan(analysis, viewAnalysis.getTable(), query, tableHandle, viewAnalysis.getColumns(), newTableLayout, Optional.of(writerTarget));
     }
 

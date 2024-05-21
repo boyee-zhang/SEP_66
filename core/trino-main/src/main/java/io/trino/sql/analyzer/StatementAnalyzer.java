@@ -58,7 +58,6 @@ import io.trino.security.AllowAllAccessControl;
 import io.trino.security.InjectedConnectorAccessControl;
 import io.trino.security.SecurityContext;
 import io.trino.security.ViewAccessControl;
-import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoWarning;
 import io.trino.spi.connector.CatalogHandle;
@@ -731,8 +730,7 @@ class StatementAnalyzer
             analysis.setRefreshMaterializedView(new Analysis.RefreshMaterializedViewAnalysis(
                     refreshMaterializedView.getTable(),
                     targetTableHandle, query,
-                    insertColumns.stream().map(columnHandles::get).collect(toImmutableList()),
-                    getRefreshType(query)));
+                    insertColumns.stream().map(columnHandles::get).collect(toImmutableList())));
 
             List<Type> tableTypes = insertColumns.stream()
                     .map(insertColumn -> tableMetadata.column(insertColumn).getType())
@@ -5919,30 +5917,6 @@ class StatementAnalyzer
             InterpretedFunctionInvoker functionInvoker = new InterpretedFunctionInvoker(plannerContext.getFunctionManager());
             return functionInvoker.invoke(coercion, session.toConnectorSession(), value);
         }
-    }
-
-    private static RefreshType getRefreshType(Query query)
-    {
-        if (query.getQueryBody() instanceof QuerySpecification querySpecification) {
-            if (querySpecification.getGroupBy().isEmpty()
-                    && querySpecification.getWindows().isEmpty()
-                    && querySpecification.getFrom().stream().allMatch(from -> from instanceof Table)
-                    && !querySpecification.getSelect().isDistinct()
-                    && getSelectFunctionNames(querySpecification).isEmpty()
-                    && querySpecification.getWhere().filter(w -> w.getChildren().stream().anyMatch(ch -> ch instanceof SubqueryExpression)).isEmpty()) {
-                return RefreshType.INCREMENTAL;
-            }
-        }
-        return RefreshType.FULL;
-    }
-
-    private static List<QualifiedName> getSelectFunctionNames(QuerySpecification querySpecification)
-    {
-        return querySpecification.getSelect().getSelectItems().stream()
-                .filter(child -> child instanceof SingleColumn)
-                .filter(child -> ((SingleColumn) child).getExpression() instanceof FunctionCall)
-                .map(child -> ((FunctionCall) ((SingleColumn) child).getExpression()).getName())
-                .collect(Collectors.toList());
     }
 
     private static boolean hasScopeAsLocalParent(Scope root, Scope parent)
