@@ -55,6 +55,7 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.procedure.Procedure;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import org.apache.iceberg.AppendFiles;
@@ -70,6 +71,7 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.avro.Avro;
 import org.apache.iceberg.mapping.MappingUtil;
 import org.apache.iceberg.mapping.NameMapping;
+import org.apache.iceberg.types.Type.NestedType;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 
@@ -90,6 +92,9 @@ import static com.google.common.collect.Streams.concat;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.hive.HiveMetadata.TRANSACTIONAL;
 import static io.trino.plugin.hive.HiveMetadata.extractHiveStorageFormat;
+import static io.trino.plugin.hive.HiveStorageFormat.AVRO;
+import static io.trino.plugin.hive.HiveStorageFormat.PARQUET;
+import static io.trino.plugin.hive.HiveTimestampPrecision.MICROSECONDS;
 import static io.trino.plugin.hive.metastore.MetastoreUtil.buildInitialPrivilegeSet;
 import static io.trino.plugin.hive.metastore.PrincipalPrivileges.NO_PRIVILEGES;
 import static io.trino.plugin.hive.util.HiveUtil.isDeltaLakeTable;
@@ -218,9 +223,9 @@ public class MigrateProcedure
             throw new TrinoException(NOT_SUPPORTED, "The table is already an Iceberg table");
         }
 
-        Schema schema = toIcebergSchema(concat(hiveTable.getDataColumns().stream(), hiveTable.getPartitionColumns().stream()).toList());
-        NameMapping nameMapping = MappingUtil.create(schema);
         HiveStorageFormat storageFormat = extractHiveStorageFormat(hiveTable.getStorage().getStorageFormat());
+        Schema schema = toIcebergSchema(concat(hiveTable.getDataColumns().stream(), hiveTable.getPartitionColumns().stream()).toList(), storageFormat);
+        NameMapping nameMapping = MappingUtil.create(schema);
         String location = hiveTable.getStorage().getLocation();
 
         Map<String, String> properties = icebergTableProperties(location, hiveTable.getParameters(), nameMapping, toIcebergFileFormat(storageFormat));
@@ -297,13 +302,13 @@ public class MigrateProcedure
         return ImmutableMap.copyOf(icebergTableProperties);
     }
 
-    private Schema toIcebergSchema(List<Column> columns)
+    private Schema toIcebergSchema(List<Column> columns, HiveStorageFormat storageFormat)
     {
         AtomicInteger nextFieldId = new AtomicInteger(1);
         List<Types.NestedField> icebergColumns = new ArrayList<>();
         for (Column column : columns) {
             int index = icebergColumns.size();
-            org.apache.iceberg.types.Type type = toIcebergType(typeManager.getType(column.getType().getTypeSignature()), nextFieldId);
+            org.apache.iceberg.types.Type type = toIcebergType(typeManager.getType(column.getType().getTypeSignature(MICROSECONDS)), nextFieldId, storageFormat);
             Types.NestedField field = Types.NestedField.of(index, false, column.getName(), type, column.getComment().orElse(null));
             icebergColumns.add(field);
         }
@@ -314,8 +319,13 @@ public class MigrateProcedure
         return new Schema(icebergSchema.asStructType().fields());
     }
 
-    private static org.apache.iceberg.types.Type toIcebergType(Type type, AtomicInteger nextFieldId)
+    private static org.apache.iceberg.types.Type toIcebergType(Type type, AtomicInteger nextFieldId, HiveStorageFormat storageFormat)
     {
+        // TODO https://github.com/trinodb/trino/issues/20481
+        if (type instanceof TimestampType && storageFormat == AVRO) {
+            throw new TrinoException(NOT_SUPPORTED, "Migrating timestamp type with %s format is not supported.".formatted(storageFormat));
+        }
+
         if (type.equals(TINYINT) || type.equals(SMALLINT)) {
             return Types.IntegerType.get();
         }
@@ -361,12 +371,38 @@ public class MigrateProcedure
             }
 
             Metrics metrics = loadMetrics(fileSystem.newInputFile(file.location()), format, schema);
+            // Hive starting with v3.1.2 adds writer timezone to the footer
+            // Without timezone Trino does not know to which timezone is supposed to adjust values from 'timestamp without timezone' column type
+            if (containsTimestampWithTimezoneColumnTypeWrittenByHiveInParquetWithoutWriterTimezoneInFooter(format, schema, fileSystem, file)) {
+                throw new TrinoException(NOT_SUPPORTED, "Migration data with type 'timestamp without timezone' is supported only for the data written by Hive v3.1.2 or later");
+            }
             DataFile dataFile = buildDataFile(file, partition, partitionSpec, format.name(), metrics);
             dataFilesBuilder.add(dataFile);
         }
         List<DataFile> dataFiles = dataFilesBuilder.build();
         log.debug("Found %d files in '%s'", dataFiles.size(), location);
         return dataFiles;
+    }
+
+    private boolean containsTimestampWithTimezoneColumnTypeWrittenByHiveInParquetWithoutWriterTimezoneInFooter(HiveStorageFormat format, Schema schema, TrinoFileSystem fileSystem, FileEntry file)
+    {
+        return PARQUET == format && containsTimestampWithTimezoneColumn(schema) && getWriterTimezone(fileSystem.newInputFile(file.location())).isEmpty();
+    }
+
+    private boolean containsTimestampWithTimezoneColumn(Schema schema)
+    {
+        return schema.columns().stream().anyMatch(column -> containsOrIsTimestampWithTimezone(column.type()));
+    }
+
+    private boolean containsOrIsTimestampWithTimezone(org.apache.iceberg.types.Type type)
+    {
+        if (type instanceof NestedType nestedType) {
+            return nestedType.fields().stream().anyMatch(f -> containsOrIsTimestampWithTimezone(f.type()));
+        }
+        else if (type instanceof Types.TimestampType timestampType) {
+            return !timestampType.shouldAdjustToUTC();
+        }
+        return false;
     }
 
     private static boolean isRecursive(String baseLocation, String location)
@@ -401,6 +437,17 @@ public class MigrateProcedure
         try (ParquetDataSource dataSource = new TrinoParquetDataSource(file, new ParquetReaderOptions(), new FileFormatDataSourceStats())) {
             ParquetMetadata metadata = MetadataReader.readFooter(dataSource, Optional.empty());
             return ParquetUtil.footerMetrics(metadata, Stream.empty(), metricsConfig, nameMapping);
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException("Failed to read file footer: " + file.location(), e);
+        }
+    }
+
+    private static Optional<String> getWriterTimezone(TrinoInputFile file)
+    {
+        try (ParquetDataSource dataSource = new TrinoParquetDataSource(file, new ParquetReaderOptions(), new FileFormatDataSourceStats())) {
+            ParquetMetadata metadata = MetadataReader.readFooter(dataSource, Optional.empty());
+            return Optional.ofNullable(metadata.getFileMetaData().getKeyValueMetaData().get("writer.time.zone"));
         }
         catch (IOException e) {
             throw new UncheckedIOException("Failed to read file footer: " + file.location(), e);
