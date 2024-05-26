@@ -464,6 +464,43 @@ public class TestDeltaLakeAlterTableCompatibility
     }
 
     @Test(groups = {DELTA_LAKE_OSS, PROFILE_SPECIFIC_TESTS})
+    public void testTypeWideningInteger()
+    {
+        String tableName = "test_dl_type_widening_integer_" + randomNameSuffix();
+
+        onDelta().executeQuery("CREATE TABLE default." + tableName + "" +
+                "(col byte) " +
+                "USING DELTA " +
+                "LOCATION 's3://" + bucketName + "/databricks-compatibility-test-" + tableName + "'" +
+                "TBLPROPERTIES ('delta.enableTypeWidening'=true)");
+        try {
+            onDelta().executeQuery("INSERT INTO default." + tableName + " VALUES 127");
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName))
+                    .containsOnly(row(127));
+
+            onDelta().executeQuery("ALTER TABLE default." + tableName + " CHANGE COLUMN col TYPE short");
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName))
+                    .containsOnly(row(127));
+            onDelta().executeQuery("INSERT INTO default." + tableName + " VALUES 32767");
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName))
+                    .containsOnly(row(127), row(32767));
+
+            onDelta().executeQuery("ALTER TABLE default." + tableName + " CHANGE COLUMN col TYPE integer");
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName))
+                    .containsOnly(row(127), row(32767));
+            onDelta().executeQuery("INSERT INTO default." + tableName + " VALUES 2147483647");
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName))
+                    .containsOnly(row(127), row(32767), row(2147483647));
+
+            assertQueryFailure(() -> onDelta().executeQuery("ALTER TABLE default." + tableName + " CHANGE COLUMN col TYPE long"))
+                    .hasMessageContaining("ALTER TABLE CHANGE COLUMN is not supported for changing column col from INT to BIGINT");
+        }
+        finally {
+            onDelta().executeQuery("DROP TABLE default." + tableName);
+        }
+    }
+
+    @Test(groups = {DELTA_LAKE_OSS, PROFILE_SPECIFIC_TESTS})
     public void testUnsupportedStatementWithUnsupportedWriterFeature()
     {
         String tableName = "test_dl_add_column_unsupported_writer_feature_" + randomNameSuffix();
