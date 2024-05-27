@@ -74,7 +74,6 @@ import io.trino.spi.type.VarcharType;
 import org.bson.Document;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -94,10 +93,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.MoreCollectors.onlyElement;
-import static com.mongodb.client.model.Aggregates.lookup;
-import static com.mongodb.client.model.Aggregates.match;
-import static com.mongodb.client.model.Aggregates.merge;
-import static com.mongodb.client.model.Aggregates.project;
+import static com.mongodb.client.model.Aggregates.*;
 import static com.mongodb.client.model.Filters.ne;
 import static com.mongodb.client.model.Projections.exclude;
 import static io.trino.plugin.base.TemporaryTables.generateTemporaryTableName;
@@ -657,30 +653,30 @@ public class MongoMetadata
             return Optional.empty();
         }
 
-        log.info("MongoDB: applyTopN with the following sortItems");
+        log.debug("MongoDB: applyTopN with the following sortItems");
 
         // MongoDB allows a column/field to take a value of any type across documents.
         // Hence, it's sort order factors in this type information as well.
         // null is valued less than any other type and so on
         // see, https://www.mongodb.com/docs/manual/reference/method/cursor.sort/#ascending-descending-sort
         // For now, we only support ASC_NULLS_FIRST and DESC_NULLS_LAST, as these are implemented in MongoDB by default
-        for (SortItem si : sortItems) {
-            log.info(si.toString());
-            if (si.getSortOrder() == SortOrder.ASC_NULLS_LAST) {
-                return Optional.empty();
-            }
-            else if (si.getSortOrder() == SortOrder.DESC_NULLS_FIRST) {
-                return Optional.empty();
-            }
+        List<SortOrder> unsupportedSortOrders = ImmutableList.of(
+                SortOrder.ASC_NULLS_LAST,
+                SortOrder.DESC_NULLS_FIRST);
+
+        Optional<SortItem> sortItemWithUnsupportedSortOrder = sortItems.stream()
+                .filter(sortItem -> unsupportedSortOrders.contains(sortItem.getSortOrder()))
+                .findFirst();
+
+        if (sortItemWithUnsupportedSortOrder.isPresent()) {
+            return Optional.empty();
         }
 
-        List<SortItem> sortItemsWithMongoColumnNames = new ArrayList<>();
+        List<SortItem> sortItemsWithMongoColumnNames = sortItems.stream()
+                .map(sortItem -> new SortItem(mongoColumnName(sortItem.getName()), sortItem.getSortOrder()))
+                .collect(toImmutableList());
 
-        for (SortItem si : sortItems) {
-            SortItem sortItemWithMongoColumnName = new SortItem(mongoColumnName(si.getName()), si.getSortOrder());
-            sortItemsWithMongoColumnNames.add(sortItemWithMongoColumnName);
-            log.info(sortItemWithMongoColumnName.toString());
-        }
+        log.debug(sortItemsWithMongoColumnNames.toString());
 
         MongoTableHandle tableHandle = new MongoTableHandle(
                 handle.schemaTableName(),
