@@ -27,6 +27,7 @@ import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
@@ -64,20 +65,24 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Float.intBitsToFloat;
+import static java.lang.Math.floorDiv;
+import static java.lang.Math.floorMod;
 import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.ZoneOffset.UTC;
 import static java.time.format.DateTimeFormatter.ISO_INSTANT;
 import static java.time.format.DateTimeFormatter.ISO_LOCAL_DATE;
+import static java.time.temporal.ChronoUnit.MICROS;
 import static java.time.temporal.ChronoUnit.MILLIS;
 import static java.util.Objects.requireNonNull;
 
@@ -138,7 +143,9 @@ public final class DeltaLakeParquetStatisticsUtils
         if (type == DateType.DATE) {
             return LocalDate.parse((String) jsonValue).toEpochDay();
         }
-        if (type == TIMESTAMP_MILLIS) {
+        if (type instanceof TimestampType timestampType) {
+            int precision = timestampType.getPrecision();
+            checkArgument(precision == 3 || precision == 6, "Unsupported precision: %s", precision);
             return Instant.parse((String) jsonValue).toEpochMilli() * MICROSECONDS_PER_MILLISECOND;
         }
         if (type instanceof RowType rowType) {
@@ -290,6 +297,17 @@ public final class DeltaLakeParquetStatisticsUtils
             return Optional.of(date.format(ISO_LOCAL_DATE));
         }
 
+        if (type instanceof TimestampType) {
+            if (statistics instanceof LongStatistics longStatistics) {
+                return Optional.of(formatTimestamp(longStatistics.genericGetMin()));
+            }
+            if (statistics instanceof BinaryStatistics binaryStatistics) {
+                DecodedTimestamp decodedTimestamp = decodeInt96Timestamp(binaryStatistics.genericGetMin());
+                Instant ts = Instant.ofEpochSecond(decodedTimestamp.epochSeconds(), decodedTimestamp.nanosOfSecond());
+                return Optional.of(ISO_INSTANT.format(ZonedDateTime.ofInstant(ts, UTC).truncatedTo(MICROS)));
+            }
+        }
+
         if (type instanceof TimestampWithTimeZoneType) {
             if (statistics instanceof LongStatistics) {
                 Instant ts = Instant.ofEpochMilli(((LongStatistics) statistics).genericGetMin());
@@ -367,6 +385,17 @@ public final class DeltaLakeParquetStatisticsUtils
             return Optional.of(date.format(ISO_LOCAL_DATE));
         }
 
+        if (type instanceof TimestampType) {
+            if (statistics instanceof LongStatistics longStatistics) {
+                return Optional.of(formatTimestamp(longStatistics.genericGetMax()));
+            }
+            if (statistics instanceof BinaryStatistics) {
+                DecodedTimestamp decodedTimestamp = decodeInt96Timestamp(((BinaryStatistics) statistics).genericGetMax());
+                Instant ts = Instant.ofEpochSecond(decodedTimestamp.epochSeconds(), decodedTimestamp.nanosOfSecond());
+                return Optional.of(ISO_INSTANT.format(ZonedDateTime.ofInstant(ts, UTC).truncatedTo(MICROS)));
+            }
+        }
+
         if (type instanceof TimestampWithTimeZoneType) {
             if (statistics instanceof LongStatistics) {
                 Instant ts = Instant.ofEpochMilli(((LongStatistics) statistics).genericGetMax());
@@ -432,5 +461,13 @@ public final class DeltaLakeParquetStatisticsUtils
 
         LOG.debug("Accumulating Parquet statistics with Trino type: %s and Parquet statistics of type: %s is not supported", type, statistics);
         return Optional.empty();
+    }
+
+    private static String formatTimestamp(long epochMicros)
+    {
+        long epochSeconds = floorDiv(epochMicros, MICROSECONDS_PER_SECOND);
+        int nanoAdjustment = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * NANOSECONDS_PER_MICROSECOND;
+        Instant instant = Instant.ofEpochSecond(epochSeconds, nanoAdjustment);
+        return ISO_INSTANT.format(instant);
     }
 }
