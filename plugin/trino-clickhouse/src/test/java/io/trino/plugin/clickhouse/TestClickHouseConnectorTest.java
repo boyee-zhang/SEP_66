@@ -21,6 +21,7 @@ import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.FilterNode;
+import io.trino.sql.planner.plan.TopNNode;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
@@ -69,6 +70,7 @@ public class TestClickHouseConnectorTest
                  SUPPORTS_AGGREGATION_PUSHDOWN_COUNT_DISTINCT,
                  SUPPORTS_AGGREGATION_PUSHDOWN_CORRELATION,
                  SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY,
+                 SUPPORTS_TOPN_PUSHDOWN,
                  SUPPORTS_TRUNCATE -> true;
             case SUPPORTS_AGGREGATION_PUSHDOWN_REGRESSION,
                  SUPPORTS_AGGREGATION_PUSHDOWN_STDDEV,
@@ -81,7 +83,6 @@ public class TestClickHouseConnectorTest
                  SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY,
                  SUPPORTS_ROW_TYPE,
                  SUPPORTS_SET_COLUMN_TYPE,
-                 SUPPORTS_TOPN_PUSHDOWN,
                  SUPPORTS_UPDATE -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
@@ -843,6 +844,32 @@ public class TestClickHouseConnectorTest
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'romania'"))
                 .returnsEmptyResult()
                 .isFullyPushedDown();
+    }
+
+    @Test
+    public void testPredicateOverTopN()
+    {
+        // predicate over TopN result
+        assertThat(query("" +
+                "SELECT orderkey " +
+                "FROM (SELECT * FROM orders ORDER BY orderdate DESC, orderkey ASC LIMIT 10)" +
+                "WHERE orderdate = DATE '1998-08-01'"))
+                .matches("VALUES BIGINT '27588', 22403, 37735")
+                .ordered()
+                .isFullyPushedDown();
+
+        assertThat(query("" +
+                "SELECT custkey " +
+                "FROM (SELECT SUM(totalprice) as sum, custkey, COUNT(*) as cnt FROM orders GROUP BY custkey order by sum desc limit 10) " +
+                "WHERE cnt > 30"))
+                .matches("VALUES BIGINT '643', 898")
+                .ordered()
+                .isFullyPushedDown();
+
+        assertThat(query(
+                "SELECT orderstatus FROM orders ORDER BY orderstatus DESC LIMIT 10"))
+                .ordered()
+                .isNotFullyPushedDown(TopNNode.class);
     }
 
     @Override
