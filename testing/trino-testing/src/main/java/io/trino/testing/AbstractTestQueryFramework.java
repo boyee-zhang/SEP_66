@@ -547,7 +547,7 @@ public abstract class AbstractTestQueryFramework
 
     protected void assertExplainDoesNotContain(@Language("SQL") String query, @Language("RegExp") String... unexpectedExplainRegExps)
     {
-        assertExplainDoesNotContain(session, query, unexpectedExplainRegExps);
+        assertExplainDoesNotContain(getSession(), query, unexpectedExplainRegExps);
     }
 
     private void assertExplainDoesNotContain(Session session, @Language("SQL") String query, @Language("RegExp") String... unexpectedExplainRegExps)

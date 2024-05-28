@@ -93,7 +93,10 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.MoreCollectors.onlyElement;
-import static com.mongodb.client.model.Aggregates.*;
+import static com.mongodb.client.model.Aggregates.lookup;
+import static com.mongodb.client.model.Aggregates.match;
+import static com.mongodb.client.model.Aggregates.merge;
+import static com.mongodb.client.model.Aggregates.project;
 import static com.mongodb.client.model.Filters.ne;
 import static com.mongodb.client.model.Projections.exclude;
 import static io.trino.plugin.base.TemporaryTables.generateTemporaryTableName;
@@ -660,12 +663,8 @@ public class MongoMetadata
         // null is valued less than any other type and so on
         // see, https://www.mongodb.com/docs/manual/reference/method/cursor.sort/#ascending-descending-sort
         // For now, we only support ASC_NULLS_FIRST and DESC_NULLS_LAST, as these are implemented in MongoDB by default
-        List<SortOrder> unsupportedSortOrders = ImmutableList.of(
-                SortOrder.ASC_NULLS_LAST,
-                SortOrder.DESC_NULLS_FIRST);
-
         Optional<SortItem> sortItemWithUnsupportedSortOrder = sortItems.stream()
-                .filter(sortItem -> unsupportedSortOrders.contains(sortItem.getSortOrder()))
+                .filter(sortItem -> sortItem.getSortOrder() == SortOrder.ASC_NULLS_LAST || sortItem.getSortOrder() == SortOrder.DESC_NULLS_FIRST)
                 .findFirst();
 
         if (sortItemWithUnsupportedSortOrder.isPresent()) {
