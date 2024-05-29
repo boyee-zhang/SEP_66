@@ -65,6 +65,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
@@ -146,6 +147,7 @@ public final class DeltaLakeParquetStatisticsUtils
         if (type instanceof TimestampType timestampType) {
             int precision = timestampType.getPrecision();
             checkArgument(precision == 3 || precision == 6, "Unsupported precision: %s", precision);
+            // Spark always writes timestamp_ntz stats with millisecond precision. Trino follows the behavior.
             return Instant.parse((String) jsonValue).toEpochMilli() * MICROSECONDS_PER_MILLISECOND;
         }
         if (type instanceof RowType rowType) {
@@ -206,6 +208,13 @@ public final class DeltaLakeParquetStatisticsUtils
         }
         if (type == DateType.DATE) {
             return LocalDate.ofEpochDay((long) value).format(ISO_LOCAL_DATE);
+        }
+        if (type == TIMESTAMP_MICROS) {
+            long epochMicros = (long) value;
+            long epochSeconds = floorDiv(epochMicros, MICROSECONDS_PER_SECOND);
+            int nanoAdjustment = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * NANOSECONDS_PER_MICROSECOND;
+            Instant instant = Instant.ofEpochSecond(epochSeconds, nanoAdjustment);
+            return ISO_INSTANT.format(ZonedDateTime.ofInstant(instant.truncatedTo(MILLIS), UTC));
         }
         if (type == TIMESTAMP_TZ_MILLIS) {
             Instant ts = Instant.ofEpochMilli(unpackMillisUtc((long) value));

@@ -432,6 +432,10 @@ public class CheckpointWriter
                                         if (isJson) {
                                             return jsonValueToTrinoValue(type, value);
                                         }
+                                        if (type.equals(TimestampType.TIMESTAMP_MICROS)) {
+                                            // This is TIMESTAMP_NTZ type in Delta Lake
+                                            return value;
+                                        }
                                         if (type instanceof TimestampType) {
                                             // We need to remap TIMESTAMP WITH TIME ZONE -> TIMESTAMP here because of
                                             // inconsistency in what type is used for DL "timestamp" type in data processing and in min/max statistics map.
