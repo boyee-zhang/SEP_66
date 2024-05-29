@@ -13,6 +13,7 @@
  */
 package io.trino.connector;
 
+import io.trino.memory.LocalMemoryManager;
 import io.trino.metadata.Catalog;
 import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.connector.CatalogHandle;
@@ -33,6 +34,7 @@ public class CatalogConnector
     private final ConnectorServices systemConnector;
     private final Optional<CatalogProperties> catalogProperties;
     private final Catalog catalog;
+    private final LocalMemoryManager localMemoryManager;
 
     public CatalogConnector(
             CatalogHandle catalogHandle,
@@ -40,6 +42,7 @@ public class CatalogConnector
             ConnectorServices catalogConnector,
             ConnectorServices informationSchemaConnector,
             ConnectorServices systemConnector,
+            LocalMemoryManager localMemoryManager,
             Optional<CatalogProperties> catalogProperties)
     {
         this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
@@ -48,6 +51,9 @@ public class CatalogConnector
         this.informationSchemaConnector = requireNonNull(informationSchemaConnector, "informationSchemaConnector is null");
         this.systemConnector = requireNonNull(systemConnector, "systemConnector is null");
         this.catalogProperties = requireNonNull(catalogProperties, "catalogProperties is null");
+
+        this.localMemoryManager = localMemoryManager;
+        localMemoryManager.getMemoryPool().tryReserve(catalogConnector.getConnector().getExtraMemoryRequirement());
 
         this.catalog = new Catalog(
                 catalogHandle.getCatalogName(),
@@ -89,6 +95,7 @@ public class CatalogConnector
 
     public void shutdown()
     {
+        localMemoryManager.getMemoryPool().free(catalogConnector.getConnector().getExtraMemoryRequirement());
         catalogConnector.shutdown();
         informationSchemaConnector.shutdown();
         systemConnector.shutdown();

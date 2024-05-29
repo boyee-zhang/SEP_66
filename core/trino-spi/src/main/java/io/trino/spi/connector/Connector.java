@@ -147,6 +147,11 @@ public interface Connector
         return emptySet();
     }
 
+    default long getExtraMemoryRequirement()
+    {
+        return 0;
+    }
+
     /**
      * @return the set of table functions provided by this connector
      */

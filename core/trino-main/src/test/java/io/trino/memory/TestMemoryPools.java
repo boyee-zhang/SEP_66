@@ -304,6 +304,23 @@ class TestMemoryPools
     }
 
     @Test
+    void testGlobalAllocations()
+    {
+        MemoryPool testPool = new MemoryPool(DataSize.ofBytes(1000));
+
+        assertThat(testPool.tryReserve(999)).isTrue();
+        assertThat(testPool.tryReserve(2)).isFalse();
+        assertThat(testPool.getReservedBytes()).isEqualTo(999);
+        assertThat(testPool.getReservedRevocableBytes()).isEqualTo(0);
+        assertThat(testPool.getTaskMemoryReservations()).isEmpty();
+        assertThat(testPool.getQueryMemoryReservations()).isEmpty();
+        assertThat(testPool.getTaggedMemoryAllocations()).isEmpty();
+
+        testPool.free(999);
+        assertThat(testPool.getReservedBytes()).isEqualTo(0);
+    }
+
+    @Test
     void testGlobalRevocableAllocations()
     {
         MemoryPool testPool = new MemoryPool(DataSize.ofBytes(1000));
