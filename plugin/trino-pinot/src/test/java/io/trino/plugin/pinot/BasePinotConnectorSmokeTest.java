@@ -1436,23 +1436,23 @@ public abstract class BasePinotConnectorSmokeTest
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
-                WHERE string_col IS NULL"""))
-                .matches("VALUES (BIGINT '0')")
-                .isNotFullyPushedDown(FilterNode.class);
+                WHERE string_col IS NULL OR string_col = 'null'"""))
+                .matches("VALUES (BIGINT '1')")
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
-                WHERE string_col IS NOT NULL"""))
-                .matches("VALUES (BIGINT '11')")
-                .isNotFullyPushedDown(FilterNode.class);
+                WHERE string_col IS NOT NULL AND string_col != 'null'"""))
+                .matches("VALUES (BIGINT '10')")
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
                 WHERE string_col = 'string_0' OR string_col IS NULL"""))
                 .matches("VALUES (BIGINT '1')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
@@ -1466,7 +1466,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE string_col != 'string_0' OR string_col IS NULL"""))
                 .matches("VALUES (BIGINT '10')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
@@ -1480,7 +1480,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE string_col NOT IN ('null', 'array_null') OR string_col IS NULL"""))
                 .matches("VALUES (BIGINT '9')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // VARCHAR NOT IN is pushed down
         assertThat(query("""
@@ -1495,7 +1495,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE string_col IN ('null', 'array_null') OR string_col IS NULL"""))
                 .matches("VALUES (BIGINT '2')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // VARCHAR IN is pushed down
         assertThat(query("""
@@ -1508,23 +1508,23 @@ public abstract class BasePinotConnectorSmokeTest
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
-                WHERE long_col IS NULL"""))
-                .matches("VALUES (BIGINT '0')")
-                .isNotFullyPushedDown(FilterNode.class);
+                WHERE long_col IS NULL OR long_col = 0"""))
+                .matches("VALUES (BIGINT '2')")
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
-                WHERE long_col IS NOT NULL"""))
-                .matches("VALUES (BIGINT '11')")
-                .isNotFullyPushedDown(FilterNode.class);
+                WHERE long_col IS NOT NULL AND long_col != 0"""))
+                .matches("VALUES (BIGINT '9')")
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
                 WHERE long_col = -3147483645 OR long_col IS NULL"""))
                 .matches("VALUES (BIGINT '1')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
@@ -1538,7 +1538,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE long_col != -3147483645 OR long_col IS NULL"""))
                 .matches("VALUES (BIGINT '10')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
@@ -1560,7 +1560,7 @@ public abstract class BasePinotConnectorSmokeTest
                         (BIGINT '-3147483639'),
                         (BIGINT '0'),
                         (BIGINT '0')""")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // BIGINT NOT IN is pushed down
         assertThat(query("""
@@ -1583,7 +1583,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE long_col IN (-3147483645, -3147483646, -3147483647) OR long_col IS NULL"""))
                 .matches("VALUES (BIGINT '3')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // BIGINT IN is pushed down
         assertThat(query("""
@@ -1598,7 +1598,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE int_col NOT IN (0, 54, 56) OR int_col IS NULL"""))
                 .matches("VALUES (55), (55), (55)")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // INTEGER NOT IN is pushed down
         assertThat(query("""
@@ -1613,7 +1613,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE int_col IN (0, 54, 56) OR int_col IS NULL"""))
                 .matches("VALUES (BIGINT '8')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // INTEGER IN is pushed down
         assertThat(query("""
@@ -1628,7 +1628,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE bool_col OR bool_col IS NULL"""))
                 .matches("VALUES (BIGINT '9')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // BOOLEAN values are pushed down
         assertThat(query("""
@@ -1643,7 +1643,7 @@ public abstract class BasePinotConnectorSmokeTest
                 FROM alltypes
                 WHERE NOT bool_col OR bool_col IS NULL"""))
                 .matches("VALUES (BIGINT '2')")
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         assertThat(query("""
                 SELECT COUNT(*)
@@ -1663,10 +1663,11 @@ public abstract class BasePinotConnectorSmokeTest
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
-                WHERE float_col NOT IN (-2.33, -3.33, -4.33, -5.33, -6.33, -7.33)"""))
-                .matches("VALUES (BIGINT '5')")
+                WHERE float_col NOT IN (0, -2.33, -3.33, -4.33, -5.33, -6.33, -7.33)"""))
+                .matches("VALUES (BIGINT '3')")
                 .isNotFullyPushedDown(FilterNode.class);
 
+        // DOUBLE values are not pushed down, applyFilter is not called
         assertThat(query("""
                 SELECT COUNT(*)
                 FROM alltypes
@@ -1681,6 +1682,18 @@ public abstract class BasePinotConnectorSmokeTest
                 WHERE double_col NOT IN (0.0, -16.33, -17.33)"""))
                 .matches("VALUES (BIGINT '7')")
                 .isNotFullyPushedDown(FilterNode.class);
+
+        assertThat(query("SELECT price, vendor FROM " + JSON_TABLE + " WHERE price IS NOT NULL"))
+                .containsAll("VALUES (REAL '3.5', VARCHAR 'vendor1')")
+                .isFullyPushedDown();
+
+        assertThat(query("SELECT COUNT(*) FROM " + JSON_TABLE + " WHERE price IS NOT NULL"))
+                .matches("VALUES (BIGINT '7')")
+                .isFullyPushedDown();
+
+        assertThat(query("SELECT COUNT(*) FROM " + JSON_TABLE + " WHERE price IS NULL"))
+                .matches("VALUES (BIGINT '0')")
+                .isFullyPushedDown();
     }
 
     @Test
