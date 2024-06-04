@@ -21,27 +21,24 @@ import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TableScanNode;
 
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public class IncrementalRefreshVisitor
-        extends PlanVisitor<RefreshType, AtomicBoolean>
+        extends PlanVisitor<Boolean, Void>
 {
     private static final Set<Class<? extends PlanNode>> INCREMENTALLY_REFRESHABLE_NODES = Set.of(TableScanNode.class, FilterNode.class, ProjectNode.class);
 
     public static RefreshType canIncrementallyRefresh(PlanNode root)
     {
-        return new IncrementalRefreshVisitor().visitPlan(root, new AtomicBoolean(false));
+        Boolean canIncrementallyRefresh = new IncrementalRefreshVisitor().visitPlan(root, null);
+        return canIncrementallyRefresh ? RefreshType.INCREMENTAL : RefreshType.FULL;
     }
 
     @Override
-    protected RefreshType visitPlan(PlanNode node, AtomicBoolean seenFullRefreshNode)
+    protected Boolean visitPlan(PlanNode node, Void context)
     {
         if (!INCREMENTALLY_REFRESHABLE_NODES.contains(node.getClass())) {
-            seenFullRefreshNode.set(true);
+            return false;
         }
-        for (PlanNode source : node.getSources()) {
-            source.accept(this, seenFullRefreshNode);
-        }
-        return seenFullRefreshNode.get() ? RefreshType.FULL : RefreshType.INCREMENTAL;
+        return node.getSources().stream().allMatch(source -> source.accept(this, null));
     }
 }

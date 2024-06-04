@@ -358,7 +358,7 @@ public final class IcebergSessionProperties
                 .add(booleanProperty(
                         INCREMENTAL_REFRESH_ENABLED,
                         "Enable Incremental refresh for MVs backed by Iceberg tables, when possible.",
-                        false,
+                        icebergConfig.isIncrementalRefreshEnabled(),
                         false))
                 .build();
     }

@@ -90,8 +90,8 @@ public class TestIcebergMaterializedView
     public void testIncrementalRefresh()
     {
         Session defaultSession = getSession();
-        Session incrRefreshEnabled = Session.builder(getSession())
-                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
+        Session incrRefreshDisabled = Session.builder(getSession())
+                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "false")
                 .build();
 
         String matViewDef = "SELECT a, b FROM source_table WHERE a < 3 OR a > 5";
@@ -110,9 +110,13 @@ public class TestIcebergMaterializedView
         assertUpdate("INSERT INTO source_table VALUES (3, 'ghi'), (4, 'jkl'), (5, 'mno'), (6, 'pqr')", 4);
 
         // will do incremental refresh, and only add: (6, 'pqr')
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 1);
+        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_1", 1);
         // will do full refresh, and (re)add: (1, 'abc'), (2, 'def'), (6, 'pqr')
-        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_2", 3);
+        assertUpdate(incrRefreshDisabled, "REFRESH MATERIALIZED VIEW mat_view_test_2", 3);
+
+        // verify that view contents are the same
+        assertThat(query("TABLE mat_view_test_1")).matches("VALUES (1, VARCHAR 'abc'), (2, VARCHAR 'def'), (6, VARCHAR 'pqr')");
+        assertThat(query("TABLE mat_view_test_2")).matches("VALUES (1, VARCHAR 'abc'), (2, VARCHAR 'def'), (6, VARCHAR 'pqr')");
 
         // cleanup
         assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
@@ -121,152 +125,39 @@ public class TestIcebergMaterializedView
     }
 
     @Test
-    public void testIncrementalRefreshDisabledForAggregation()
+    public void testIncrementalRefreshDisabledForUpdates()
     {
-        Session incrRefreshEnabled = Session.builder(getSession())
-                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
-                .build();
+        Session defaultSession = getSession();
 
-        String matViewDef = "SELECT b, sum(a) AS total FROM source_table GROUP BY b";
+        String matViewDef = "SELECT a, b FROM source_table WHERE a < 3 OR a > 5";
 
-        // create source table and MV
+        // create source table and two identical MVs
         assertUpdate("CREATE TABLE source_table (a int, b varchar)");
         assertUpdate("INSERT INTO source_table VALUES (1, 'abc'), (2, 'def')", 2);
         assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
 
-        // execute first refresh: afterwards MV will contain: ('abc', 1), ('def', 2)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
+        // execute first refresh: afterwards both MVs will contain: (1, 'abc'), (2, 'def')
+        assertUpdate("REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
 
         // add some new rows to source
-        assertUpdate("INSERT INTO source_table VALUES (3, 'ghi'), (4, 'jkl'), (5, 'abc'), (6, 'ghi')", 4);
+        assertUpdate("INSERT INTO source_table VALUES (3, 'ghi'), (4, 'jkl'), (5, 'mno'), (6, 'pqr')", 4);
 
-        // will perform full refresh: ('abc', 6), ('def', 2), ('ghi', 9), ('jkl', 4)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 4);
+        // will do incremental refresh, and only add: (6, 'pqr')
+        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_1", 1);
+
+        // update one row and append one
+        assertUpdate("UPDATE source_table SET b = 'updated' WHERE a = 1", 1);
+        assertUpdate("INSERT INTO source_table VALUES (7, 'stv')", 1);
+
+        // will do full refresh due to the above update command
+        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_1", 4);
+
+        // verify view contents
+        assertThat(query("TABLE mat_view_test_1")).matches("VALUES (1, VARCHAR 'updated'), (2, VARCHAR 'def'), (6, VARCHAR 'pqr'), (7, VARCHAR 'stv')");
 
         // cleanup
         assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
         assertUpdate("DROP TABLE source_table");
-    }
-
-    @Test
-    public void testIncrementalRefreshDisabledForJoin()
-    {
-        Session incrRefreshEnabled = Session.builder(getSession())
-                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
-                .build();
-
-        String matViewDef = "SELECT c.custkey, o.price FROM orders o JOIN customer c ON o.custkey = c.custkey";
-
-        // create source table and MV
-        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
-        assertUpdate("CREATE TABLE customer (custkey int, name varchar)");
-        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 2, 4000, 'Flight ticket')", 3);
-        assertUpdate("INSERT INTO customer VALUES (1, 'Mike'), (2, 'Lakshmi')", 2);
-        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
-
-        // execute first refresh: afterwards MV will contain: (1, 1500), (1, 3000), (2, 4000)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
-
-        // add some new rows to source
-        assertUpdate("INSERT INTO orders VALUES (4, 1, 2000, 'Napkins'), (5, 2, 5500, 'Sunscreen')", 2);
-
-        // will perform full refresh: (1, 1500), (1, 3000), (2, 4000), (1, 2000), (2, 5500)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 5);
-
-        // cleanup
-        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
-        assertUpdate("DROP TABLE orders");
-        assertUpdate("DROP TABLE customer");
-    }
-
-    @Test
-    public void testIncrementalRefreshDisabledForWhereSubQuery()
-    {
-        Session incrRefreshEnabled = Session.builder(getSession())
-                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
-                .build();
-
-        String matViewDef = "SELECT custkey, price FROM orders WHERE custkey IN (SELECT custkey FROM customer WHERE name LIKE '%Mi%')";
-
-        // create source table and MV
-        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
-        assertUpdate("CREATE TABLE customer (custkey int, name varchar)");
-        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 2, 4000, 'Flight ticket')", 3);
-        assertUpdate("INSERT INTO customer VALUES (1, 'Mike'), (2, 'Lakshmi')", 2);
-        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
-
-        // execute first refresh: afterwards MV will contain: (1, 1500), (1, 3000)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
-
-        // add some new rows to source
-        assertUpdate("INSERT INTO orders VALUES (4, 1, 2000, 'Napkins'), (5, 2, 5500, 'Sunscreen')", 2);
-
-        // will perform full refresh: (1, 1500), (1, 3000), (1, 2000)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
-
-        // cleanup
-        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
-        assertUpdate("DROP TABLE orders");
-        assertUpdate("DROP TABLE customer");
-    }
-
-    @Test
-    public void testIncrementalRefreshDisabledForTableSubQuery()
-    {
-        Session incrRefreshEnabled = Session.builder(getSession())
-                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
-                .build();
-
-        String matViewDef = "SELECT custkey FROM (SELECT c.custkey as custkey, o.price FROM orders o JOIN customer c ON o.custkey = c.custkey)";
-
-        // create source table and MV
-        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
-        assertUpdate("CREATE TABLE customer (custkey int, name varchar)");
-        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 2, 4000, 'Flight ticket')", 3);
-        assertUpdate("INSERT INTO customer VALUES (1, 'Mike'), (2, 'Lakshmi')", 2);
-        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
-
-        // execute first refresh: afterwards MV will contain: (1), (1), (2)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
-
-        // add some new rows to source
-        assertUpdate("INSERT INTO orders VALUES (4, 1, 2000, 'Napkins'), (5, 2, 5500, 'Sunscreen')", 2);
-
-        // will perform full refresh: (1), (1), (2), (1), (2)
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 5);
-
-        // cleanup
-        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
-        assertUpdate("DROP TABLE orders");
-        assertUpdate("DROP TABLE customer");
-    }
-
-    @Test
-    public void testIncrementalRefreshDisabledForSelectDistinct()
-    {
-        Session incrRefreshEnabled = Session.builder(getSession())
-                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "true")
-                .build();
-
-        String matViewDef = "SELECT distinct itemname FROM orders";
-
-        // create source table and MV
-        assertUpdate("CREATE TABLE orders (orderkey int, custkey int, price int, itemname varchar)");
-        assertUpdate("INSERT INTO orders VALUES (1, 1, 1500, 'Microwave'), (2, 1, 3000, 'Desk lamp'), (3, 3, 4000, 'Flight ticket')", 3);
-        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
-
-        // execute first refresh: afterwards MV will contain: ('Microwave'), ('Desk lamp'), ('Flight ticket')
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 3);
-
-        // add some new rows to source
-        assertUpdate("INSERT INTO orders VALUES (4, 3, 5000, 'Microwave'), (5, 2, 5500, 'Sunscreen')", 2);
-
-        // will perform full refresh: ('Microwave'), ('Desk lamp'), ('Flight ticket'), ('Sunscreen')
-        assertUpdate(incrRefreshEnabled, "REFRESH MATERIALIZED VIEW mat_view_test_1", 4);
-
-        // cleanup
-        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
-        assertUpdate("DROP TABLE orders");
     }
 
     @Test

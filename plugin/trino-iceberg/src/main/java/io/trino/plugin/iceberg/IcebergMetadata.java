@@ -195,6 +195,7 @@ import java.util.regex.Pattern;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -2899,6 +2900,7 @@ public class IcebergMetadata
     @Override
     public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, RefreshType refreshType)
     {
+        checkState(fromSnapshotsForRefresh.isEmpty(), "Snapshot map must be empty at the start of MV refresh operation.");
         IcebergTableHandle table = (IcebergTableHandle) tableHandle;
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
         beginTransaction(icebergTable);
@@ -2911,7 +2913,7 @@ public class IcebergMetadata
         boolean shouldUseIncremental = isIncrementalRefreshEnabled(session)
                 && refreshType == RefreshType.INCREMENTAL
                 // and when all backing tables are Iceberg tables
-                && sourceTableHandles.stream().allMatch(t -> t instanceof IcebergTableHandle)
+                && sourceTableHandles.stream().allMatch(tbl -> tbl instanceof IcebergTableHandle)
                 // and the fromSnapshots are available for the source tables
                 && dependencies.isPresent() && !dependencies.get().equals(UNKNOWN_SNAPSHOT_TOKEN);
 
@@ -2937,10 +2939,11 @@ public class IcebergMetadata
             List<ConnectorTableHandle> sourceTableHandles,
             List<String> sourceTableFunctions)
     {
+        checkState(fromSnapshotsForRefresh.isPresent(), "Snapshot map must be initialized by the end of MV refresh operation.");
         IcebergWritableTableHandle table = (IcebergWritableTableHandle) insertHandle;
 
         Table icebergTable = transaction.table();
-        boolean isFullRefresh = fromSnapshotsForRefresh.isEmpty() || fromSnapshotsForRefresh.get().isEmpty();
+        boolean isFullRefresh = fromSnapshotsForRefresh.get().isEmpty();
         if (isFullRefresh) {
             // delete before insert .. simulating overwrite
             log.info("Performing full MV refresh for storage table: %s", table.getName());

@@ -79,6 +79,7 @@ public class TestingMetadata
     private final ConcurrentMap<SchemaTableName, ConnectorViewDefinition> views = new ConcurrentHashMap<>();
     private final ConcurrentMap<SchemaTableName, ConnectorMaterializedViewDefinition> materializedViews = new ConcurrentHashMap<>();
     private final Set<SchemaTableName> freshMaterializedViews = synchronizedSet(new HashSet<>());
+    private final ConcurrentMap<String, RefreshType> queryIdToRefreshType = new ConcurrentHashMap<>();
 
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
@@ -314,6 +315,7 @@ public class TestingMetadata
     @Override
     public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, RefreshType refreshType)
     {
+        queryIdToRefreshType.put(session.getQueryId(), refreshType);
         return TestingHandle.INSTANCE;
     }
 
@@ -381,10 +383,16 @@ public class TestingMetadata
     @Override
     public void revokeTablePrivileges(ConnectorSession session, SchemaTableName tableName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption) {}
 
+    public Optional<RefreshType> getRefreshType(String queryId)
+    {
+        return Optional.ofNullable(queryIdToRefreshType.get(queryId));
+    }
+
     public void clear()
     {
         views.clear();
         tables.clear();
+        queryIdToRefreshType.clear();
     }
 
     private static SchemaTableName getTableName(ConnectorTableHandle tableHandle)

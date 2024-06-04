@@ -119,25 +119,20 @@ public class IcebergSplitManager
             // check if fromSnapshot is still part of the table's snapshot history
             boolean containsFromSnapshot = SnapshotUtil.isAncestorOf(icebergTable, fromSnapshot);
             if (containsFromSnapshot) {
-                boolean containsDelete = false;
+                boolean containsModifiedRows = false;
                 for (Snapshot snapshot : SnapshotUtil.ancestorsBetween(icebergTable, icebergTable.currentSnapshot().snapshotId(), fromSnapshot)) {
                     if (snapshot.operation().equals(DataOperations.OVERWRITE) || snapshot.operation().equals(DataOperations.DELETE)) {
-                        containsDelete = true;
+                        containsModifiedRows = true;
                         break;
                     }
                 }
-                if (!containsDelete) {
+                if (!containsModifiedRows) {
                     return icebergTable.newIncrementalAppendScan().fromSnapshotExclusive(fromSnapshot).planWith(executor);
                 }
-                else {
-                    // the snapshot range contains deletes, so we cannot do an incremental refresh. Fall back to full refresh.
-                    icebergMetadata.disableIncrementalRefresh();
-                }
             }
-            else {
-                // fromSnapshot is missing (could be due to snapshot expiration or rollback). Fall back to full refresh.
-                icebergMetadata.disableIncrementalRefresh();
-            }
+            // fromSnapshot is missing (could be due to snapshot expiration or rollback), or snapshot range contains modifications
+            // (deletes or overwrites), so we cannot perform incremental refresh. Falling back to full refresh.
+            icebergMetadata.disableIncrementalRefresh();
         }
         return icebergTable.newScan().useSnapshot(table.getSnapshotId().get()).planWith(executor);
     }
