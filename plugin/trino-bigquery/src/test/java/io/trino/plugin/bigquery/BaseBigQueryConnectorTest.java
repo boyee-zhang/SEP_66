@@ -52,6 +52,7 @@ import static io.trino.testing.TestingProperties.requiredNonEmptySystemProperty;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.lang.String.format;
 import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -80,18 +81,18 @@ public abstract class BaseBigQueryConnectorTest
         return switch (connectorBehavior) {
             case SUPPORTS_TRUNCATE -> true;
             case SUPPORTS_ADD_COLUMN,
-                    SUPPORTS_CREATE_MATERIALIZED_VIEW,
-                    SUPPORTS_CREATE_VIEW,
-                    SUPPORTS_DEREFERENCE_PUSHDOWN,
-                    SUPPORTS_MERGE,
-                    SUPPORTS_NEGATIVE_DATE,
-                    SUPPORTS_NOT_NULL_CONSTRAINT,
-                    SUPPORTS_RENAME_COLUMN,
-                    SUPPORTS_RENAME_SCHEMA,
-                    SUPPORTS_RENAME_TABLE,
-                    SUPPORTS_SET_COLUMN_TYPE,
-                    SUPPORTS_TOPN_PUSHDOWN,
-                    SUPPORTS_UPDATE -> false;
+                 SUPPORTS_CREATE_MATERIALIZED_VIEW,
+                 SUPPORTS_CREATE_VIEW,
+                 SUPPORTS_DEREFERENCE_PUSHDOWN,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_NEGATIVE_DATE,
+                 SUPPORTS_NOT_NULL_CONSTRAINT,
+                 SUPPORTS_RENAME_COLUMN,
+                 SUPPORTS_RENAME_SCHEMA,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_SET_COLUMN_TYPE,
+                 SUPPORTS_TOPN_PUSHDOWN,
+                 SUPPORTS_UPDATE -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
     }
@@ -362,6 +363,56 @@ public abstract class BaseBigQueryConnectorTest
                             "('test_comment_backslash', " + varcharLiteral("a\\backslash") + ")," +
                             "('test_comment_question', " + varcharLiteral("a?question") + ")," +
                             "('test_comment_bracket', " + varcharLiteral("[square bracket]") + ")");
+        }
+        finally {
+            assertUpdate("DROP SCHEMA " + schemaName + " CASCADE");
+        }
+    }
+
+    @Test
+    public void testStreamRelationColumns()
+    {
+        String schemaName = "test_columns" + randomNameSuffix();
+        assertUpdate("CREATE SCHEMA " + schemaName);
+        try {
+            // Can't use testColumnNameDataProvider() here as it includes unsupported column names
+            List<String> columnNames = List.of(
+                    "_a",
+                    "a-b",
+                    "c_",
+                    "c d",
+                    "name-列",
+                    "start&%=+:'<>#|end",
+                    "type inside array<int64> name");
+            String trinoColumns = columnNames.stream()
+                    .map(column -> "\"" + column.replace("\"", "\"\"") + "\" varchar")
+                    .collect(joining(", "));
+            String bigQueryColumns = columnNames.stream()
+                    .map(column -> "`" + column.replace("`", "\\`") + "` string")
+                    .collect(joining(", "));
+            assertUpdate("CREATE TABLE " + schemaName + ".trino_columns (" + trinoColumns + ", complex row(" + trinoColumns + "))");
+            bigQuerySqlExecutor.execute("CREATE TABLE " + schemaName + ".bigquery_columns (" + bigQueryColumns + ", complex struct<" + bigQueryColumns + ">)");
+
+            // notice no predicate for table name to make sure BigQueryMetadata.streamRelationColumns() is used
+            assertQuery(
+                    "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = '" + schemaName + "'",
+                    "VALUES " +
+                            "('trino_columns', '_a', 'varchar')," +
+                            "('trino_columns', 'a-b', 'varchar')," +
+                            "('trino_columns', 'c_', 'varchar')," +
+                            "('trino_columns', 'c d', 'varchar')," +
+                            "('trino_columns', 'name-列', 'varchar')," +
+                            "('trino_columns', 'start&%=+:''<>#|end', 'varchar')," +
+                            "('trino_columns', 'type inside array<int64> name', 'varchar')," +
+                            "('trino_columns', 'complex', 'row(_a varchar, a-b varchar, c_ varchar, c d varchar, name-列 varchar, start&%=+:''<>#|end varchar, type inside array<int64> name varchar)')," +
+                            "('bigquery_columns', '_a', 'varchar')," +
+                            "('bigquery_columns', 'a-b', 'varchar')," +
+                            "('bigquery_columns', 'c_', 'varchar')," +
+                            "('bigquery_columns', 'c d', 'varchar')," +
+                            "('bigquery_columns', 'name-列', 'varchar')," +
+                            "('bigquery_columns', 'start&%=+:''<>#|end', 'varchar')," +
+                            "('bigquery_columns', 'type inside array<int64> name', 'varchar')," +
+                            "('bigquery_columns', 'complex', 'row(_a varchar, a-b varchar, c_ varchar, c d varchar, name-列 varchar, start&%=+:''<>#|end varchar, type inside array<int64> name varchar)')");
         }
         finally {
             assertUpdate("DROP SCHEMA " + schemaName + " CASCADE");
@@ -646,6 +697,12 @@ public abstract class BaseBigQueryConnectorTest
                             "   a bigint,\n" +
                             "   b bigint\n" +
                             ")");
+            // querying without predicates can use different metadata methods
+            String tableName = table.getName().split("\\.", 2)[1];
+            assertThat(computeActual("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'test'").getMaterializedRows().stream()
+                    .filter(row -> row.getField(0).equals(tableName))
+                    .map(row -> row.getField(1)))
+                    .containsExactlyInAnyOrder("a", "b");
         }
     }
 
@@ -786,9 +843,9 @@ public abstract class BaseBigQueryConnectorTest
 
         @Language("SQL")
         String checkForLabelQuery = """
-                    SELECT * FROM region-us.INFORMATION_SCHEMA.JOBS_BY_USER WHERE EXISTS(
-                        SELECT * FROM UNNEST(labels) AS label WHERE label.key = 'trino_query' AND label.value = '%s'
-                    )""".formatted(expectedLabel);
+                SELECT * FROM region-us.INFORMATION_SCHEMA.JOBS_BY_USER WHERE EXISTS(
+                    SELECT * FROM UNNEST(labels) AS label WHERE label.key = 'trino_query' AND label.value = '%s'
+                )""".formatted(expectedLabel);
 
         assertEventually(() -> assertThat(bigQuerySqlExecutor.executeQuery(checkForLabelQuery).getValues())
                 .extracting(values -> values.get("query").getStringValue())
