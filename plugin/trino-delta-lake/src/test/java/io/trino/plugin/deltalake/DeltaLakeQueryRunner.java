@@ -194,7 +194,7 @@ public final class DeltaLakeQueryRunner
 
             Logger log = Logger.get(DeltaLakeQueryRunner.class);
             log.info("======== SERVER STARTED ========");
-            log.info("\n====\n%s\n====", queryRunner.getCoordinator().getBaseUrl());
+            log.info("\n====\nurl: %s\ndata: %s\n====", queryRunner.getCoordinator().getBaseUrl(), queryRunner.getCoordinator().getBaseDataDir());
         }
     }
 
