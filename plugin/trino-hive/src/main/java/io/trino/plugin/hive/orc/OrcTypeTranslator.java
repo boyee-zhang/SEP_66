@@ -44,6 +44,7 @@ import io.trino.spi.type.VarcharType;
 
 import java.util.Optional;
 
+import static io.trino.orc.metadata.OrcType.OrcTypeKind.BINARY;
 import static io.trino.orc.metadata.OrcType.OrcTypeKind.BOOLEAN;
 import static io.trino.orc.metadata.OrcType.OrcTypeKind.BYTE;
 import static io.trino.orc.metadata.OrcType.OrcTypeKind.DATE;
@@ -60,6 +61,7 @@ import static io.trino.plugin.hive.coercions.DecimalCoercers.createDecimalToVarc
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createIntegerNumberToDecimalCoercer;
 import static io.trino.plugin.hive.coercions.DoubleToVarcharCoercers.createDoubleToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.FloatToVarcharCoercers.createFloatToVarcharCoercer;
+import static io.trino.plugin.hive.coercions.VarbinaryToVarcharCoercers.createVarbinaryToVarcharCoercer;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
@@ -170,6 +172,10 @@ public final class OrcTypeTranslator
             return Optional.of(createDecimalToVarcharCoercer(
                     DecimalType.createDecimalType(fromOrcType.getPrecision().orElseThrow(), fromOrcType.getScale().orElseThrow()),
                     varcharType));
+        }
+
+        if (fromOrcTypeKind == BINARY && toTrinoType instanceof VarcharType varcharType) {
+            return Optional.of(createVarbinaryToVarcharCoercer(varcharType, true));
         }
         return Optional.empty();
     }
