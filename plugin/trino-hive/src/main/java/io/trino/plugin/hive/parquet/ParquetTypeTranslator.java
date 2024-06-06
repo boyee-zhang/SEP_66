@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hive.parquet;
 
+import io.trino.plugin.hive.HiveStorageFormat;
 import io.trino.plugin.hive.coercions.IntegerNumberToDoubleCoercer;
 import io.trino.plugin.hive.coercions.IntegerNumberToVarcharCoercer;
 import io.trino.plugin.hive.coercions.TypeCoercer;
@@ -25,16 +26,21 @@ import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotat
 
 import java.util.Optional;
 
+import static io.trino.hive.formats.HiveClassNames.PARQUET_HIVE_SERDE_CLASS;
 import static io.trino.parquet.reader.ColumnReaderFactory.isIntegerAnnotationAndPrimitive;
+import static io.trino.plugin.hive.HiveStorageFormat.PARQUET;
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createDecimalToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.DoubleToVarcharCoercers.createDoubleToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.FloatToVarcharCoercers.createFloatToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.TimestampCoercer.LongTimestampToVarcharCoercer;
+import static io.trino.plugin.hive.coercions.VarbinaryToVarcharCoercers.createVarbinaryToVarcharCoercer;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.DOUBLE;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
@@ -78,6 +84,10 @@ public final class ParquetTypeTranslator
             }
             if (fromParquetType == INT96) {
                 return Optional.of(new LongTimestampToVarcharCoercer(TIMESTAMP_NANOS, varcharType));
+            }
+            // Binary data type doesn't have any annotation
+            if ((fromParquetType == BINARY || fromParquetType == FIXED_LEN_BYTE_ARRAY) && typeAnnotation == null) {
+                return Optional.of(createVarbinaryToVarcharCoercer(varcharType, PARQUET));
             }
         }
         return Optional.empty();
