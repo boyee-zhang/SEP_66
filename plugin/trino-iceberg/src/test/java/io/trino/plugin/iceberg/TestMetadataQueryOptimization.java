@@ -20,6 +20,7 @@ import io.trino.plugin.hive.metastore.Database;
 import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.hive.metastore.HiveMetastoreFactory;
 import io.trino.spi.security.PrincipalType;
+import io.trino.sql.ir.Cast;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.planner.assertions.BasePushdownPlanTest;
 import io.trino.testing.PlanTester;
@@ -116,6 +117,30 @@ public class TestMetadataQueryOptimization
                 session,
                 anyTree(
                         values(ImmutableList.of("b", "c"), ImmutableList.of())));
+    }
+
+    @Test
+    public void testOptimizationWithNullPartitions()
+    {
+        String testTable = "test_metadata_optimization_with_null_partitions";
+
+        getPlanTester().executeStatement(format(
+                "CREATE TABLE %s (a, b, c) WITH (PARTITIONING = ARRAY['b', 'c'])" +
+                        "AS VALUES (5, 6, CAST(NULL AS INTEGER)), (8, 9, CAST(NULL AS INTEGER))",
+                testTable));
+
+        Session session = Session.builder(getPlanTester().getDefaultSession())
+                .setSystemProperty("optimize_metadata_queries", "true")
+                .build();
+
+        assertPlan(
+                format("SELECT DISTINCT b, c FROM %s ORDER BY b", testTable),
+                session,
+                anyTree(values(
+                        ImmutableList.of("b", "c"),
+                        ImmutableList.of(
+                                ImmutableList.of(new Constant(INTEGER, 6L), new Constant(INTEGER, null)),
+                                ImmutableList.of(new Constant(INTEGER, 9L), new Constant(INTEGER, null))))));
     }
 
     @AfterAll
