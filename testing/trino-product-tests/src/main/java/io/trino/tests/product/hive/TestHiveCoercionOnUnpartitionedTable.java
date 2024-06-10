@@ -158,6 +158,8 @@ public class TestHiveCoercionOnUnpartitionedTable
                             timestamp_to_smaller_varchar       TIMESTAMP,
                             smaller_varchar_to_timestamp       VARCHAR(4),
                             varchar_to_timestamp               STRING,
+                            binary_to_string                   BINARY,
+                            binary_to_smaller_varchar          BINARY,
                             id                                 BIGINT)
                        STORED AS\s""" + fileFormat);
     }
@@ -235,34 +237,6 @@ public class TestHiveCoercionOnUnpartitionedTable
     {
         // TODO: These expected failures should be fixed.
         return ImmutableMap.<ColumnContext, String>builder()
-                // ORC
-                .put(columnContext("orc", "row_to_row"), "Cannot read SQL type 'smallint' from ORC stream '.row_to_row.ti2si' of type BYTE")
-                .put(columnContext("orc", "list_to_list"), "Cannot read SQL type 'integer' from ORC stream '.list_to_list.item.ti2int' of type BYTE")
-                .put(columnContext("orc", "map_to_map"), "Cannot read SQL type 'integer' from ORC stream '.map_to_map.key' of type BYTE")
-                .put(columnContext("orc", "tinyint_to_smallint"), "Cannot read SQL type 'smallint' from ORC stream '.tinyint_to_smallint' of type BYTE")
-                .put(columnContext("orc", "tinyint_to_int"), "Cannot read SQL type 'integer' from ORC stream '.tinyint_to_int' of type BYTE")
-                .put(columnContext("orc", "tinyint_to_bigint"), "Cannot read SQL type 'bigint' from ORC stream '.tinyint_to_bigint' of type BYTE")
-                .put(columnContext("orc", "double_to_float"), "Cannot read SQL type 'real' from ORC stream '.double_to_float' of type DOUBLE")
-                .put(columnContext("orc", "longdecimal_to_shortdecimal"), "Decimal does not fit long (invalid table schema?)")
-                .put(columnContext("orc", "float_to_decimal"), "Cannot read SQL type 'decimal(10,5)' from ORC stream '.float_to_decimal' of type FLOAT")
-                .put(columnContext("orc", "double_to_decimal"), "Cannot read SQL type 'decimal(10,5)' from ORC stream '.double_to_decimal' of type DOUBLE")
-                .put(columnContext("orc", "decimal_to_float"), "Cannot read SQL type 'real' from ORC stream '.decimal_to_float' of type DECIMAL")
-                .put(columnContext("orc", "decimal_to_double"), "Cannot read SQL type 'double' from ORC stream '.decimal_to_double' of type DECIMAL")
-                .put(columnContext("orc", "longdecimal_to_tinyint"), "Cannot read SQL type 'tinyint' from ORC stream '.longdecimal_to_tinyint' of type DECIMAL")
-                .put(columnContext("orc", "shortdecimal_to_tinyint"), "Cannot read SQL type 'tinyint' from ORC stream '.shortdecimal_to_tinyint' of type DECIMAL")
-                .put(columnContext("orc", "longdecimal_to_smallint"), "Cannot read SQL type 'smallint' from ORC stream '.longdecimal_to_smallint' of type DECIMAL")
-                .put(columnContext("orc", "shortdecimal_to_smallint"), "Cannot read SQL type 'smallint' from ORC stream '.shortdecimal_to_smallint' of type DECIMAL")
-                .put(columnContext("orc", "too_big_shortdecimal_to_smallint"), "Cannot read SQL type 'smallint' from ORC stream '.too_big_shortdecimal_to_smallint' of type DECIMAL")
-                .put(columnContext("orc", "longdecimal_to_int"), "Cannot read SQL type 'integer' from ORC stream '.longdecimal_to_int' of type DECIMAL")
-                .put(columnContext("orc", "shortdecimal_to_int"), "Cannot read SQL type 'integer' from ORC stream '.shortdecimal_to_int' of type DECIMAL")
-                .put(columnContext("orc", "shortdecimal_with_0_scale_to_int"), "Cannot read SQL type 'integer' from ORC stream '.shortdecimal_with_0_scale_to_int' of type DECIMAL")
-                .put(columnContext("orc", "longdecimal_to_bigint"), "Cannot read SQL type 'bigint' from ORC stream '.longdecimal_to_bigint' of type DECIMAL")
-                .put(columnContext("orc", "shortdecimal_to_bigint"), "Cannot read SQL type 'bigint' from ORC stream '.shortdecimal_to_bigint' of type DECIMAL")
-                .put(columnContext("orc", "short_decimal_to_bounded_varchar"), "Cannot read SQL type 'varchar(30)' from ORC stream '.short_decimal_to_bounded_varchar' of type DECIMAL")
-                .put(columnContext("orc", "long_decimal_to_bounded_varchar"), "Cannot read SQL type 'varchar(30)' from ORC stream '.long_decimal_to_bounded_varchar' of type DECIMAL")
-                .put(columnContext("orc", "timestamp_row_to_row"), "Cannot read SQL type 'varchar' from ORC stream '.timestamp_row_to_row.timestamp2string' of type TIMESTAMP with attributes {}")
-                .put(columnContext("orc", "timestamp_list_to_list"), "Cannot read SQL type 'varchar' from ORC stream '.timestamp_row_to_row.timestamp2string' of type TIMESTAMP with attributes {}")
-                .put(columnContext("orc", "timestamp_map_to_map"), "Cannot read SQL type 'varchar' from ORC stream '.timestamp_row_to_row.timestamp2string' of type TIMESTAMP with attributes {}")
                 // PARQUET
                 .put(columnContext("parquet", "row_to_row"), "Unsupported Trino column type (varchar) for Parquet column ([row_to_row, bi2vc] optional int64 bi2vc (INTEGER(64,true)))")
                 .put(columnContext("parquet", "list_to_list"), "Unsupported Trino column type (varchar) for Parquet column ([list_to_list, list, element, bi2vc] optional int64 bi2vc (INTEGER(64,true)))")
@@ -382,6 +356,7 @@ public class TestHiveCoercionOnUnpartitionedTable
                 .put(columnContext("3.1", "parquet", "string_to_timestamp"), "org.apache.hadoop.io.Text cannot be cast to org.apache.hadoop.hive.serde2.io.TimestampWritableV2")
                 .put(columnContext("3.1", "parquet", "timestamp_to_date"), "org.apache.hadoop.io.Text cannot be cast to org.apache.hadoop.hive.serde2.io.TimestampWritableV2")
                 .put(columnContext("3.1", "parquet", "double_to_float"), "org.apache.hadoop.hive.serde2.io.DoubleWritable cannot be cast to org.apache.hadoop.io.FloatWritable")
+                .put(columnContext("3.1", "parquet", "binary_to_smaller_varchar"), "org.apache.hadoop.io.BytesWritable cannot be cast to org.apache.hadoop.hive.serde2.io.HiveVarcharWritable")
                 .buildOrThrow();
     }
 }

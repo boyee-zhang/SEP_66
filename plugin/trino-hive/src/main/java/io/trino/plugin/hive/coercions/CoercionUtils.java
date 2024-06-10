@@ -52,6 +52,7 @@ import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
+import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 
 import java.util.List;
@@ -76,6 +77,7 @@ import static io.trino.plugin.hive.coercions.DecimalCoercers.createIntegerNumber
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createRealToDecimalCoercer;
 import static io.trino.plugin.hive.coercions.DoubleToVarcharCoercers.createDoubleToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.FloatToVarcharCoercers.createFloatToVarcharCoercer;
+import static io.trino.plugin.hive.coercions.VarbinaryToVarcharCoercers.createVarbinaryToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.VarcharToIntegralNumericCoercers.createVarcharToIntegerNumberCoercer;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.block.ColumnarArray.toColumnarArray;
@@ -269,6 +271,10 @@ public final class CoercionUtils
                     coercionContext);
         }
 
+        if (fromType instanceof VarbinaryType && toType instanceof VarcharType varcharType) {
+            return Optional.of(createVarbinaryToVarcharCoercer(varcharType, coercionContext.isOrcFile));
+        }
+
         throw new TrinoException(NOT_SUPPORTED, format("Unsupported coercion from %s to %s", fromHiveType, toHiveType));
     }
 
@@ -367,7 +373,7 @@ public final class CoercionUtils
         return Optional.of(new StructCoercer(RowType.from(fromField.build()), RowType.from(toField.build()), coercers.build()));
     }
 
-    private static class ListCoercer
+    public static class ListCoercer
             extends TypeCoercer<ArrayType, ArrayType>
     {
         private final TypeCoercer<? extends Type, ? extends Type> elementCoercer;
@@ -399,7 +405,7 @@ public final class CoercionUtils
         }
     }
 
-    private static class MapCoercer
+    public static class MapCoercer
             extends TypeCoercer<MapType, MapType>
     {
         private final Optional<TypeCoercer<? extends Type, ? extends Type>> keyCoercer;
@@ -438,7 +444,7 @@ public final class CoercionUtils
         }
     }
 
-    private static class StructCoercer
+    public static class StructCoercer
             extends TypeCoercer<RowType, RowType>
     {
         private final List<Optional<TypeCoercer<? extends Type, ? extends Type>>> coercers;

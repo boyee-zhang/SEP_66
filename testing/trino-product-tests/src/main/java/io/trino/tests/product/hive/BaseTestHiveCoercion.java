@@ -197,6 +197,8 @@ public abstract class BaseTestHiveCoercion
                 "timestamp_to_smaller_varchar",
                 "smaller_varchar_to_timestamp",
                 "varchar_to_timestamp",
+                "binary_to_string",
+                "binary_to_smaller_varchar",
                 "id");
 
         Function<Engine, Map<String, List<Object>>> expected = engine -> expectedValuesForEngineProvider(engine, tableName, booleanToVarcharVal);
@@ -329,6 +331,8 @@ public abstract class BaseTestHiveCoercion
                         "  TIMESTAMP '2121-07-15 15:30:12.123', " +
                         "  '2121', " +
                         "  '2019-01-29 23:59:59.123', " +
+                        "  X'58BF', " +
+                        "  X'58EDA080', " +
                         "  1), " +
                         "(" +
                         "  CAST(ROW (NULL, 1, -100, -2323, -12345, 2) AS ROW(keep VARCHAR, ti2si TINYINT, si2int SMALLINT, int2bi INTEGER, bi2vc BIGINT, lower2uppercase BIGINT)), " +
@@ -433,6 +437,8 @@ public abstract class BaseTestHiveCoercion
                         "  TIMESTAMP '1970-01-01 00:00:00.123', " +
                         "  '1970', " +
                         "  '1970-01-01 00:00:00.123', " +
+                        "  X'58BF58', " +
+                        "  X'58EDBFBF', " +
                         "  1)",
                 tableName));
         resetHiveTimestampPrecision();
@@ -443,25 +449,29 @@ public abstract class BaseTestHiveCoercion
         String hiveValueForCaseChangeField;
         String coercedNaN = "NaN";
         Predicate<String> isFormat = formatName -> tableName.toLowerCase(ENGLISH).contains(formatName);
-        Map<String, List<Object>> fromVarcharCoercions = ImmutableMap.of(
+        Map<String, List<Object>> specialCoercion = ImmutableMap.of(
                 "string_to_boolean", ImmutableList.of(true, false),
                 "special_string_to_boolean", ImmutableList.of(true, false),
                 "numeric_string_to_boolean", ImmutableList.of(true, true),
                 "varchar_to_boolean", ImmutableList.of(false, false),
                 "varchar_to_tinyint", ImmutableList.of(-127, -10),
-                "varchar_to_smallint", ImmutableList.of(-32768, 0));
+                "varchar_to_smallint", ImmutableList.of(-32768, 0),
+                "binary_to_string", ImmutableList.of("X\uFFFD", "X\uFFFDX"),
+                "binary_to_smaller_varchar", ImmutableList.of("X\uFFFD", "X\uFFFD"));
         if (Stream.of("rctext", "textfile", "sequencefile").anyMatch(isFormat)) {
             hiveValueForCaseChangeField = "\"lower2uppercase\":2";
         }
         else if (isFormat.test("orc")) {
             hiveValueForCaseChangeField = "\"LOWER2UPPERCASE\":null";
-            fromVarcharCoercions = ImmutableMap.of(
+            specialCoercion = ImmutableMap.of(
                     "string_to_boolean", Arrays.asList(null, null),
                     "special_string_to_boolean", Arrays.asList(null, null),
                     "numeric_string_to_boolean", ImmutableList.of(true, false),
                     "varchar_to_boolean", Arrays.asList(null, null),
                     "varchar_to_tinyint", Arrays.asList(-127, null),
-                    "varchar_to_smallint", Arrays.asList(-32768, null));
+                    "varchar_to_smallint", Arrays.asList(-32768, null),
+                    "binary_to_string", ImmutableList.of("58 bf", "58 bf 58"),
+                    "binary_to_smaller_varchar", ImmutableList.of("58", "58"));
         }
         else {
             hiveValueForCaseChangeField = "\"LOWER2UPPERCASE\":2";
@@ -528,7 +538,7 @@ public abstract class BaseTestHiveCoercion
                                         .build()) :
                                 "{-2:{\"ti2bi\":null,\"int2bi\":-2323,\"float2double\":-1.5,\"add\":null}}"))
                 .put("boolean_to_varchar", booleanToVarcharVal)
-                .putAll(fromVarcharCoercions)
+                .putAll(specialCoercion)
                 .put("tinyint_to_smallint", ImmutableList.of(
                         -1,
                         1))
@@ -1203,6 +1213,8 @@ public abstract class BaseTestHiveCoercion
                 row("timestamp_to_smaller_varchar", "varchar(4)"),
                 row("smaller_varchar_to_timestamp", "timestamp(3)"),
                 row("varchar_to_timestamp", "timestamp(3)"),
+                row("binary_to_string", "varchar"),
+                row("binary_to_smaller_varchar", "varchar(2)"),
                 row("id", "bigint"));
     }
 
@@ -1323,6 +1335,8 @@ public abstract class BaseTestHiveCoercion
                 .put("timestamp_list_to_list", ARRAY) // list
                 .put("timestamp_map_to_map", JAVA_OBJECT) // map
                 .put("string_to_timestamp", TIMESTAMP)
+                .put("binary_to_string", VARCHAR)
+                .put("binary_to_smaller_varchar", VARCHAR)
                 .buildOrThrow();
 
         assertThat(queryResult)
@@ -1435,6 +1449,8 @@ public abstract class BaseTestHiveCoercion
         onHive().executeQuery(format("ALTER TABLE %s CHANGE COLUMN timestamp_to_smaller_varchar timestamp_to_smaller_varchar varchar(4)", tableName));
         onHive().executeQuery(format("ALTER TABLE %s CHANGE COLUMN smaller_varchar_to_timestamp smaller_varchar_to_timestamp timestamp", tableName));
         onHive().executeQuery(format("ALTER TABLE %s CHANGE COLUMN varchar_to_timestamp varchar_to_timestamp timestamp", tableName));
+        onHive().executeQuery(format("ALTER TABLE %s CHANGE COLUMN binary_to_string binary_to_string string", tableName));
+        onHive().executeQuery(format("ALTER TABLE %s CHANGE COLUMN binary_to_smaller_varchar binary_to_smaller_varchar varchar(2)", tableName));
     }
 
     protected static TableInstance<?> mutableTableInstanceOf(TableDefinition tableDefinition)
