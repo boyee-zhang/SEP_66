@@ -24,6 +24,7 @@ import io.trino.plugin.iceberg.catalog.TrinoCatalogFactory;
 import org.apache.iceberg.nessie.NessieIcebergClient;
 import org.projectnessie.client.NessieClientBuilder;
 import org.projectnessie.client.api.NessieApiV1;
+import org.projectnessie.client.api.NessieApiV2;
 import org.projectnessie.client.auth.BearerAuthenticationProvider;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
@@ -58,7 +59,12 @@ public class IcebergNessieCatalogModule
         icebergNessieCatalogConfig.getBearerToken()
                 .ifPresent(token -> builder.withAuthentication(BearerAuthenticationProvider.create(token)));
 
-        return new NessieIcebergClient(builder.build(NessieApiV1.class),
+        NessieApiV1 api = switch (icebergNessieCatalogConfig.getClientAPIVersion()) {
+            case V1 -> builder.build(NessieApiV1.class);
+            case V2 -> builder.build(NessieApiV2.class);
+        };
+
+        return new NessieIcebergClient(api,
                 icebergNessieCatalogConfig.getDefaultReferenceName(),
                 null,
                 ImmutableMap.of());
