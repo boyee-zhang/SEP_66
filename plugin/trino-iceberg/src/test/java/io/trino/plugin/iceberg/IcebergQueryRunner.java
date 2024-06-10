@@ -429,7 +429,7 @@ public final class IcebergQueryRunner
                     .setInitialTables(TpchTable.getTables())
                     .build();
             log.info("======== SERVER STARTED ========");
-            log.info("\n====\n%s\n====", queryRunner.getCoordinator().getBaseUrl());
+            log.info("\n====\nurl: %s\ndata: %s\n====", queryRunner.getCoordinator().getBaseUrl(), queryRunner.getCoordinator().getBaseDataDir());
         }
     }
 }
