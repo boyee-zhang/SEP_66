@@ -449,10 +449,10 @@ public class TestDeltaLakeWriteDatabricksCompatibility
                 "(a INT)" +
                 "USING DELTA " +
                 "LOCATION '" + ("s3://" + bucketName + "/" + directoryName) + "'" +
-                "TBLPROPERTIES ('delta.enableDeletionVectors' = true)");
+                "TBLPROPERTIES ('delta.feature.generatedColumns'='supported')");
         try {
             assertThatThrownBy(() -> onTrino().executeQuery("CALL delta.system.vacuum('default', '" + tableName + "', '7d')"))
-                    .hasMessageContaining("Cannot execute vacuum procedure with [deletionVectors] writer features");
+                    .hasMessageContaining("Cannot execute vacuum procedure with [generatedColumns] writer features");
         }
         finally {
             dropDeltaTableWithRetry("default." + tableName);
