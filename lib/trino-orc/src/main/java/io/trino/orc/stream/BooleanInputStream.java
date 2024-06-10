@@ -19,7 +19,6 @@ import java.io.IOException;
 
 import static com.google.common.base.Preconditions.checkState;
 
-@SuppressWarnings("NarrowingCompoundAssignment")
 public class BooleanInputStream
         implements ValueInputStream<BooleanStreamCheckpoint>
 {
@@ -69,6 +68,7 @@ public class BooleanInputStream
     }
 
     @Override
+    @SuppressWarnings("NarrowingCompoundAssignment")
     public void skip(long items)
             throws IOException
     {

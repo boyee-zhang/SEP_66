@@ -134,7 +134,6 @@ public class BenchmarkPartitionedOutputOperator
     }
 
     @State(Scope.Thread)
-    @SuppressWarnings("unused")
     public static class BenchmarkData
     {
         private static final int DEFAULT_POSITION_COUNT = 8192;
