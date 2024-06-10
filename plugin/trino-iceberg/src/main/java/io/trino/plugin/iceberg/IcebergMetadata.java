@@ -14,6 +14,7 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.base.Splitter;
+import com.google.common.base.Splitter.MapSplitter;
 import com.google.common.base.Suppliers;
 import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
@@ -49,6 +50,7 @@ import io.trino.plugin.iceberg.procedure.IcebergTableExecuteHandle;
 import io.trino.plugin.iceberg.procedure.IcebergTableProcedureId;
 import io.trino.plugin.iceberg.util.DataFileWithDeleteFiles;
 import io.trino.spi.ErrorCode;
+import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.Assignment;
@@ -193,6 +195,7 @@ import java.util.regex.Pattern;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -227,6 +230,7 @@ import static io.trino.plugin.iceberg.IcebergSessionProperties.getHiveCatalogNam
 import static io.trino.plugin.iceberg.IcebergSessionProperties.getRemoveOrphanFilesMinRetention;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isCollectExtendedStatisticsOnWrite;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isExtendedStatisticsEnabled;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.isIncrementalRefreshEnabled;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isMergeManifestsOnWrite;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isProjectionPushdownEnabled;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isQueryPartitionFilterRequired;
@@ -326,6 +330,7 @@ public class IcebergMetadata
 
     private static final Integer DELETE_BATCH_SIZE = 1000;
     public static final int GET_METADATA_BATCH_SIZE = 1000;
+    private static final MapSplitter MAP_SPLITTER = Splitter.on(",").trimResults().omitEmptyStrings().withKeyValueSeparator("=");
 
     private final TypeManager typeManager;
     private final CatalogHandle trinoCatalogHandle;
@@ -337,6 +342,7 @@ public class IcebergMetadata
     private final Map<IcebergTableHandle, TableStatistics> tableStatisticsCache = new ConcurrentHashMap<>();
 
     private Transaction transaction;
+    private Optional<Map<SchemaTableName, Long>> fromSnapshotsForRefresh = Optional.empty();
 
     public IcebergMetadata(
             TypeManager typeManager,
@@ -2894,11 +2900,33 @@ public class IcebergMetadata
     }
 
     @Override
-    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode)
+    public ConnectorInsertTableHandle beginRefreshMaterializedView(ConnectorSession session, ConnectorTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, RetryMode retryMode, RefreshType refreshType)
     {
+        checkState(fromSnapshotsForRefresh.isEmpty(), "Snapshot map must be empty at the start of MV refresh operation.");
         IcebergTableHandle table = (IcebergTableHandle) tableHandle;
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
         beginTransaction(icebergTable);
+
+        fromSnapshotsForRefresh = Optional.of(new HashMap<>());
+        Optional<String> dependencies = Optional.ofNullable(icebergTable.currentSnapshot())
+                .map(Snapshot::summary)
+                .map(summary -> summary.get(DEPENDS_ON_TABLES));
+
+        boolean shouldUseIncremental = isIncrementalRefreshEnabled(session)
+                && refreshType == RefreshType.INCREMENTAL
+                // and when all backing tables are Iceberg tables
+                && sourceTableHandles.stream().allMatch(tbl -> tbl instanceof IcebergTableHandle)
+                // and the fromSnapshots are available for the source tables
+                && dependencies.isPresent() && !dependencies.get().equals(UNKNOWN_SNAPSHOT_TOKEN);
+
+        if (shouldUseIncremental) {
+            Map<String, String> baseTableToSnapshot = MAP_SPLITTER.split(dependencies.get());
+            for (Map.Entry<String, String> baseTable : baseTableToSnapshot.entrySet()) {
+                String[] schemaTable = baseTable.getKey().split("\\.");
+                long snapshot = Long.parseLong(baseTable.getValue());
+                fromSnapshotsForRefresh.get().put(new SchemaTableName(schemaTable[0], schemaTable[1]), snapshot);
+            }
+        }
 
         return newWritableTableHandle(table.getSchemaTableName(), icebergTable, retryMode);
     }
@@ -2913,13 +2941,21 @@ public class IcebergMetadata
             List<ConnectorTableHandle> sourceTableHandles,
             List<String> sourceTableFunctions)
     {
+        checkState(fromSnapshotsForRefresh.isPresent(), "Snapshot map must be initialized by the end of MV refresh operation.");
         IcebergWritableTableHandle table = (IcebergWritableTableHandle) insertHandle;
 
         Table icebergTable = transaction.table();
-        // delete before insert .. simulating overwrite
-        transaction.newDelete()
-                .deleteFromRowFilter(Expressions.alwaysTrue())
-                .commit();
+        boolean isFullRefresh = fromSnapshotsForRefresh.get().isEmpty();
+        if (isFullRefresh) {
+            // delete before insert .. simulating overwrite
+            log.info("Performing full MV refresh for storage table: %s", table.getName());
+            transaction.newDelete()
+                    .deleteFromRowFilter(Expressions.alwaysTrue())
+                    .commit();
+        }
+        else {
+            log.info("Performing incremental MV refresh for storage table: %s", table.getName());
+        }
 
         List<CommitTaskData> commitTasks = fragments.stream()
                 .map(slice -> commitTaskCodec.fromJson(slice.getBytes()))
@@ -2977,6 +3013,7 @@ public class IcebergMetadata
 
         transaction.commitTransaction();
         transaction = null;
+        fromSnapshotsForRefresh = Optional.empty();
         return Optional.of(new HiveWrittenPartitions(commitTasks.stream()
                 .map(CommitTaskData::path)
                 .collect(toImmutableList())));
@@ -3184,6 +3221,16 @@ public class IcebergMetadata
     public WriterScalingOptions getInsertWriterScalingOptions(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         return WriterScalingOptions.ENABLED;
+    }
+
+    public Optional<Long> getIncrementalRefreshFromSnapshot(SchemaTableName schemaTableName)
+    {
+        return fromSnapshotsForRefresh.map(map -> map.get(schemaTableName));
+    }
+
+    public void disableIncrementalRefresh()
+    {
+        fromSnapshotsForRefresh.ifPresent(Map::clear);
     }
 
     private static CollectedStatistics processComputedTableStatistics(Table table, Collection<ComputedStatistics> computedStatistics)

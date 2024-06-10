@@ -87,6 +87,80 @@ public class TestIcebergMaterializedView
     }
 
     @Test
+    public void testIncrementalRefresh()
+    {
+        Session defaultSession = getSession();
+        Session incrRefreshDisabled = Session.builder(getSession())
+                .setCatalogSessionProperty("iceberg", "incremental_refresh_enabled", "false")
+                .build();
+
+        String matViewDef = "SELECT a, b FROM source_table WHERE a < 3 OR a > 5";
+
+        // create source table and two identical MVs
+        assertUpdate("CREATE TABLE source_table (a int, b varchar)");
+        assertUpdate("INSERT INTO source_table VALUES (1, 'abc'), (2, 'def')", 2);
+        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
+        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_2 AS %s".formatted(matViewDef));
+
+        // execute first refresh: afterwards both MVs will contain: (1, 'abc'), (2, 'def')
+        assertUpdate("REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
+        assertUpdate("REFRESH MATERIALIZED VIEW mat_view_test_2", 2);
+
+        // add some new rows to source
+        assertUpdate("INSERT INTO source_table VALUES (3, 'ghi'), (4, 'jkl'), (5, 'mno'), (6, 'pqr')", 4);
+
+        // will do incremental refresh, and only add: (6, 'pqr')
+        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_1", 1);
+        // will do full refresh, and (re)add: (1, 'abc'), (2, 'def'), (6, 'pqr')
+        assertUpdate(incrRefreshDisabled, "REFRESH MATERIALIZED VIEW mat_view_test_2", 3);
+
+        // verify that view contents are the same
+        assertThat(query("TABLE mat_view_test_1")).matches("VALUES (1, VARCHAR 'abc'), (2, VARCHAR 'def'), (6, VARCHAR 'pqr')");
+        assertThat(query("TABLE mat_view_test_2")).matches("VALUES (1, VARCHAR 'abc'), (2, VARCHAR 'def'), (6, VARCHAR 'pqr')");
+
+        // cleanup
+        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
+        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_2");
+        assertUpdate("DROP TABLE source_table");
+    }
+
+    @Test
+    public void testIncrementalRefreshDisabledForUpdates()
+    {
+        Session defaultSession = getSession();
+
+        String matViewDef = "SELECT a, b FROM source_table WHERE a < 3 OR a > 5";
+
+        // create source table and two identical MVs
+        assertUpdate("CREATE TABLE source_table (a int, b varchar)");
+        assertUpdate("INSERT INTO source_table VALUES (1, 'abc'), (2, 'def')", 2);
+        assertUpdate("CREATE MATERIALIZED VIEW mat_view_test_1 AS %s".formatted(matViewDef));
+
+        // execute first refresh: afterwards both MVs will contain: (1, 'abc'), (2, 'def')
+        assertUpdate("REFRESH MATERIALIZED VIEW mat_view_test_1", 2);
+
+        // add some new rows to source
+        assertUpdate("INSERT INTO source_table VALUES (3, 'ghi'), (4, 'jkl'), (5, 'mno'), (6, 'pqr')", 4);
+
+        // will do incremental refresh, and only add: (6, 'pqr')
+        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_1", 1);
+
+        // update one row and append one
+        assertUpdate("UPDATE source_table SET b = 'updated' WHERE a = 1", 1);
+        assertUpdate("INSERT INTO source_table VALUES (7, 'stv')", 1);
+
+        // will do full refresh due to the above update command
+        assertUpdate(defaultSession, "REFRESH MATERIALIZED VIEW mat_view_test_1", 4);
+
+        // verify view contents
+        assertThat(query("TABLE mat_view_test_1")).matches("VALUES (1, VARCHAR 'updated'), (2, VARCHAR 'def'), (6, VARCHAR 'pqr'), (7, VARCHAR 'stv')");
+
+        // cleanup
+        assertUpdate("DROP MATERIALIZED VIEW mat_view_test_1");
+        assertUpdate("DROP TABLE source_table");
+    }
+
+    @Test
     public void testTwoIcebergCatalogs()
     {
         Session defaultIceberg = getSession();
