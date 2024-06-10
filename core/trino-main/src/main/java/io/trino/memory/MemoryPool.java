@@ -207,6 +207,19 @@ public class MemoryPool
         return true;
     }
 
+    public boolean tryReserve(long bytes)
+    {
+        checkArgument(bytes >= 0, "'%s' is negative", bytes);
+        synchronized (this) {
+            if (getFreeBytes() - bytes < 0) {
+                return false;
+            }
+            reservedBytes += bytes;
+        }
+        onMemoryReserved();
+        return true;
+    }
+
     public boolean tryReserveRevocable(long bytes)
     {
         checkArgument(bytes >= 0, "'%s' is negative", bytes);
@@ -315,6 +328,22 @@ public class MemoryPool
         }
 
         reservedRevocableBytes -= bytes;
+        if (getFreeBytes() > 0 && future != null) {
+            future.set(null);
+            future = null;
+        }
+    }
+
+    public void free(long bytes)
+    {
+        checkArgument(bytes >= 0, "'%s' is negative", bytes);
+        checkArgument(reservedBytes >= bytes, "tried to free more memory than is reserved");
+        if (bytes == 0) {
+            // Freeing zero bytes is a no-op
+            return;
+        }
+
+        reservedBytes -= bytes;
         if (getFreeBytes() > 0 && future != null) {
             future.set(null);
             future = null;
