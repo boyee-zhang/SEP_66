@@ -55,6 +55,7 @@ import static io.trino.plugin.bigquery.BigQueryClient.TABLE_TYPES;
 import static io.trino.plugin.bigquery.BigQueryClient.selectSql;
 import static io.trino.plugin.bigquery.BigQueryErrorCode.BIGQUERY_FAILED_TO_EXECUTE_QUERY;
 import static io.trino.plugin.bigquery.BigQuerySessionProperties.isSkipViewMaterialization;
+import static io.trino.plugin.bigquery.BigQuerySessionProperties.readParallelism;
 import static io.trino.plugin.bigquery.BigQueryUtil.isWildcardTable;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
@@ -69,7 +70,6 @@ public class BigQuerySplitManager
 
     private final BigQueryClientFactory bigQueryClientFactory;
     private final BigQueryReadClientFactory bigQueryReadClientFactory;
-    private final Optional<Integer> parallelism;
     private final boolean viewEnabled;
     private final boolean arrowSerializationEnabled;
     private final Duration viewExpiration;
@@ -85,7 +85,6 @@ public class BigQuerySplitManager
     {
         this.bigQueryClientFactory = requireNonNull(bigQueryClientFactory, "bigQueryClientFactory cannot be null");
         this.bigQueryReadClientFactory = requireNonNull(bigQueryReadClientFactory, "bigQueryReadClientFactory cannot be null");
-        this.parallelism = config.getParallelism();
         this.viewEnabled = config.isViewsEnabled();
         this.arrowSerializationEnabled = config.isArrowSerializationEnabled();
         this.viewExpiration = config.getViewExpireDuration();
@@ -104,7 +103,7 @@ public class BigQuerySplitManager
         log.debug("getSplits(transaction=%s, session=%s, table=%s)", transaction, session, table);
         BigQueryTableHandle bigQueryTableHandle = (BigQueryTableHandle) table;
 
-        int actualParallelism = parallelism.orElseGet(() -> nodeManager.getRequiredWorkerNodes().size());
+        int actualParallelism = readParallelism(session).orElseGet(() -> nodeManager.getRequiredWorkerNodes().size());
         TupleDomain<ColumnHandle> tableConstraint = bigQueryTableHandle.constraint();
         Optional<String> filter = BigQueryFilterQueryBuilder.buildFilter(tableConstraint);
 
